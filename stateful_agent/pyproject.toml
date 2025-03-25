@@ -1,0 +1,43 @@
+[project]
+name = "stateful-agent"
+version = "0.1.0"
+description = "A sophisticated agent system with persistent state management using SQLite and ChromaDB"
+authors = [
+    {name = "Sangdae Nam", email = "nsd96@berkeley.edu"}
+]
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+keywords = ["agent", "langchain", "chromadb", "sqlite", "vector-database"]
+dependencies = [
+    "chromadb>=0.6.3",
+    "hyperdock-fileio>=0.5.3",
+    "hyperpocket>=0.5.2",
+    "hyperpocket-langchain>=0.5.2",
+    "langchain>=0.3.15",
+    "langchain-chroma>=0.2.2",
+    "langchain-community>=0.3.20",
+    "langchain-openai>=0.3.1",
+    "pypdf>=5.4.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "black>=23.0",
+    "isort>=5.0",
+    "mypy>=1.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.isort]
+profile = "black"
+line_length = 100

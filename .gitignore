@@ -1,0 +1,20 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Secret configuration files
+.secrets.toml
+.env
+
+# Data files
+data/
+.log
+chroma_langchain_db
+sqlite_langchain_db.db
