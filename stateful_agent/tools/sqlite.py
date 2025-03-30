@@ -69,3 +69,147 @@ def get_user_data(user_name: str):
     conn.commit()
     conn.close()
     return result
+
+
+@function_tool
+def create_lab(
+    lab_name: str,
+    institution: str,
+    leader: str,
+    members: list,
+    research_areas: list,
+    website: str = "",
+    description: str = "",
+):
+    """
+    Create a new research lab in the database with its information.
+    """
+    lab_name = lab_name.lower()
+    conn = sqlite3.connect(os.getenv("SQLITE_DB_PATH"))
+    cursor = conn.cursor()
+
+    # Create labs table if it doesn't exist
+    cursor.execute(
+        """CREATE TABLE IF NOT EXISTS labs
+             (lab_name text PRIMARY KEY, institution text, leader text, website text, description text)"""
+    )
+
+    # Create lab_members table if it doesn't exist
+    cursor.execute(
+        """CREATE TABLE IF NOT EXISTS lab_members
+             (lab_name text, member_name text, scholar_url text, PRIMARY KEY (lab_name, member_name))"""
+    )
+
+    # Create lab_research_areas table if it doesn't exist
+    cursor.execute(
+        """CREATE TABLE IF NOT EXISTS lab_research_areas
+             (lab_name text, research_area text, PRIMARY KEY (lab_name, research_area))"""
+    )
+
+    try:
+        # Insert lab basic information
+        cursor.execute(
+            "INSERT INTO labs (lab_name, institution, leader, website, description) VALUES (?, ?, ?, ?, ?)",
+            (lab_name, institution, leader, website, description),
+        )
+
+        # Insert lab members
+        for member in members:
+            name = member.get("name", "")
+            scholar_url = member.get("scholar_url", "")
+            cursor.execute(
+                "INSERT INTO lab_members (lab_name, member_name, scholar_url) VALUES (?, ?, ?)",
+                (lab_name, name, scholar_url),
+            )
+
+        # Insert research areas
+        for area in research_areas:
+            cursor.execute(
+                "INSERT INTO lab_research_areas (lab_name, research_area) VALUES (?, ?)",
+                (lab_name, area),
+            )
+
+        conn.commit()
+        conn.close()
+        return f"Lab '{lab_name}' created successfully"
+    except sqlite3.IntegrityError:
+        conn.close()
+        return f"Lab '{lab_name}' already exists"
+
+
+@function_tool
+def get_lab_info(lab_name: str):
+    """
+    Get lab information including its members and research areas.
+    """
+    lab_name = lab_name.lower()
+    conn = sqlite3.connect(os.getenv("SQLITE_DB_PATH"))
+    cursor = conn.cursor()
+
+    # Get lab basic information
+    cursor.execute("SELECT * FROM labs WHERE lab_name = ?", (lab_name,))
+    lab_info = cursor.fetchone()
+
+    if not lab_info:
+        conn.close()
+        return f"Lab '{lab_name}' does not exist"
+
+    # Get lab members
+    cursor.execute(
+        "SELECT member_name, scholar_url FROM lab_members WHERE lab_name = ?",
+        (lab_name,),
+    )
+    members = cursor.fetchall()
+
+    # Get research areas
+    cursor.execute(
+        "SELECT research_area FROM lab_research_areas WHERE lab_name = ?", (lab_name,)
+    )
+    research_areas = cursor.fetchall()
+
+    conn.close()
+
+    return {"lab_info": lab_info, "members": members, "research_areas": research_areas}
+
+
+@function_tool
+def add_lab_member(lab_name: str, member_name: str, scholar_url: str):
+    """
+    Add a new member to an existing lab.
+    """
+    lab_name = lab_name.lower()
+    conn = sqlite3.connect(os.getenv("SQLITE_DB_PATH"))
+    cursor = conn.cursor()
+
+    # Check if lab exists
+    cursor.execute("SELECT * FROM labs WHERE lab_name = ?", (lab_name,))
+    lab_info = cursor.fetchone()
+
+    if not lab_info:
+        conn.close()
+        return f"Lab '{lab_name}' does not exist"
+
+    try:
+        cursor.execute(
+            "INSERT INTO lab_members (lab_name, member_name, scholar_url) VALUES (?, ?, ?)",
+            (lab_name, member_name, scholar_url),
+        )
+        conn.commit()
+        conn.close()
+        return f"Member '{member_name}' added to lab '{lab_name}' successfully"
+    except sqlite3.IntegrityError:
+        conn.close()
+        return f"Member '{member_name}' already exists in lab '{lab_name}'"
+
+
+@function_tool
+def get_all_labs():
+    """
+    Get a list of all labs in the database.
+    """
+    conn = sqlite3.connect(os.getenv("SQLITE_DB_PATH"))
+    cursor = conn.cursor()
+    cursor.execute("SELECT lab_name FROM labs")
+    labs = cursor.fetchall()
+    conn.close()
+    return labs
