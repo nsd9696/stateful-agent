@@ -161,6 +161,9 @@ uv run python agent.py
 # Crawl Google Scholar for papers by lab members
 > Collect papers from vision_research_lab members
 
+# Stay updated with the lab
+> Check new papers for vision_research_lab
+
 # Get paper recommendations
 > Recommend 5 papers from the last 30 days related to vision_research_lab
 

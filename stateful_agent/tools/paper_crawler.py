@@ -315,14 +315,266 @@ def check_new_papers(lab_name: str):
     Returns a detailed report of the crawling results.
     """
     lab_name = lab_name.lower()
-    result = crawl_scholar_papers(lab_name)
-    # Add a prefix to make it clear this was from check_new_papers
-    if isinstance(result, str):
-        if "Process completed" in result:
-            return f"Checked for new papers: {result}"
-        else:
-            return f"Failed to check for new papers: {result}"
-    return result
+    
+    # Implement crawl_scholar_papers functionality directly here
+    # Get lab info from database
+    conn = sqlite3.connect(SQLITE_DB_PATH)
+    cursor = conn.cursor()
+
+    # Check if lab exists
+    cursor.execute("SELECT * FROM labs WHERE lab_name = ?", (lab_name,))
+    lab_info = cursor.fetchone()
+
+    if not lab_info:
+        conn.close()
+        return f"Checked for new papers: Lab '{lab_name}' does not exist"
+
+    # Get lab members and their scholar URLs
+    cursor.execute(
+        "SELECT member_name, scholar_url FROM lab_members WHERE lab_name = ?",
+        (lab_name,),
+    )
+    members = cursor.fetchall()
+
+    if not members:
+        conn.close()
+        return f"Checked for new papers: No members found for lab '{lab_name}'"
+
+    # Create paper_tracking table if it doesn't exist (using arxiv_id as paper_id)
+    cursor.execute(
+        """CREATE TABLE IF NOT EXISTS paper_tracking
+             (lab_name text, paper_id text, title text, author text, date_added text, 
+             pdf_path text, PRIMARY KEY (lab_name, paper_id))"""
+    )
+
+    # Create a collection for the lab if it doesn't exist
+    collection_name = f"{lab_name}_papers"
+    vector_store = Chroma(
+        collection_name=collection_name,
+        embedding_function=embeddings,
+        persist_directory=CHROMA_PERSIST_DIRECTORY,
+    )
+
+    papers_added = 0
+    errors = []
+
+    # Lab data directory
+    lab_data_dir = os.path.join(DEFAULT_DATA_DIR, lab_name)
+    Path(lab_data_dir).mkdir(parents=True, exist_ok=True)
+
+    for member_name, scholar_url in members:
+        if not scholar_url:
+            continue
+
+        try:
+            # Get the Google Scholar page
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            }
+            # Add a timeout to the request
+            response = requests.get(scholar_url, headers=headers, timeout=15)
+            response.raise_for_status()  # Raise an exception for bad status codes
+
+            soup = BeautifulSoup(response.text, "html.parser")
+
+            # Find paper entries
+            paper_entries = soup.find_all("tr", class_="gsc_a_tr")
+
+            for entry in paper_entries:
+                paper_title = "Unknown Title"  # Default title
+                try:
+                    # Get paper title
+                    title_element = entry.find("td", class_="gsc_a_t").find("a")
+                    if not title_element:
+                        continue
+                    paper_title = title_element.text.strip()
+
+                    # Get paper year
+                    year_element = entry.find("td", class_="gsc_a_y")
+                    year = year_element.text.strip() if year_element else "Unknown"
+
+                    # Get paper link (to details page)
+                    paper_link = title_element.get("href")
+                    if not paper_link:
+                        continue
+
+                    paper_url = f"https://scholar.google.com{paper_link}"
+
+                    # Wait to avoid being rate limited
+                    time.sleep(
+                        2
+                    )  # Consider increasing sleep or using exponential backoff
+
+                    # Get the paper details page
+                    details_response = requests.get(
+                        paper_url, headers=headers, timeout=10
+                    )
+                    details_response.raise_for_status()
+
+                    details_soup = BeautifulSoup(details_response.text, "html.parser")
+
+                    # Find arxiv link
+                    links = details_soup.find_all("a")
+                    arxiv_link = None
+
+                    for link in links:
+                        href = link.get("href", "")
+                        if "arxiv.org" in href:
+                            arxiv_link = href
+                            break
+
+                    if not arxiv_link:
+                        continue  # Skip if no arxiv link found
+
+                    # Extract arxiv ID from the link (handle different URL formats)
+                    match = re.search(
+                        r"arxiv\.org/(?:abs|pdf|ps)/([\w.-]+?)(?:v\d+)?(?:.pdf)?$",
+                        arxiv_link,
+                    )
+                    if not match:
+                        match = re.search(
+                            r"arxiv\.org/ftp/arxiv/papers/(\d{4})/(\d{4}\.\d+)",
+                            arxiv_link,
+                        )  # Handle ftp links
+                        if match:
+                            arxiv_id = f"{match.group(1)}.{match.group(2)}"
+                        else:
+                            errors.append(
+                                f"Could not extract arXiv ID from link: {arxiv_link} for paper '{paper_title}'"
+                            )
+                            continue
+                    else:
+                        arxiv_id = match.group(1)
+
+                    # Use arxiv_id as the unique paper identifier
+                    paper_id = arxiv_id
+
+                    # Check if paper already exists in the database using arxiv_id
+                    cursor.execute(
+                        "SELECT * FROM paper_tracking WHERE lab_name = ? AND paper_id = ?",
+                        (lab_name, paper_id),
+                    )
+                    existing_paper = cursor.fetchone()
+
+                    if existing_paper:
+                        continue  # Skip if paper already exists
+
+                    # Download the paper using the arxiv API
+                    client = arxiv.Client(
+                        num_retries=5, delay_seconds=5
+                    )  # Add retries and delay
+                    search = arxiv.Search(id_list=[arxiv_id])
+
+                    # Use a flag to ensure we only process the first valid result
+                    processed_result = False
+                    for result in client.results(search):
+                        if processed_result:
+                            continue  # Skip if already processed
+
+                        # Use arxiv_id for filename, replacing slashes/dots if necessary
+                        safe_arxiv_id = arxiv_id.replace("/", "_").replace(".", "_")
+                        filename = f"{safe_arxiv_id}.pdf"
+                        filepath = os.path.join(lab_data_dir, filename)
+
+                        # Download the PDF
+                        result.download_pdf(dirpath=lab_data_dir, filename=filename)
+
+                        # Add to tracking database using arxiv_id
+                        current_date = datetime.now().strftime("%Y-%m-%d")
+                        cursor.execute(
+                            "INSERT INTO paper_tracking (lab_name, paper_id, title, author, date_added, pdf_path) VALUES (?, ?, ?, ?, ?, ?)",
+                            (
+                                lab_name,
+                                paper_id,
+                                result.title,
+                                member_name,
+                                current_date,
+                                filepath,
+                            ),  # Use title from arxiv result
+                        )
+
+                        # Load and add to vector database
+                        loader = PyPDFLoader(filepath)
+                        documents = loader.load()
+
+                        # Generate UUIDs for each document chunk
+                        uuids = [str(uuid4()) for _ in range(len(documents))]
+
+                        # Add metadata including arxiv_id
+                        for doc in documents:
+                            doc.metadata["paper_id"] = paper_id  # This is arxiv_id
+                            doc.metadata["title"] = result.title
+                            doc.metadata["author"] = (
+                                member_name  # The lab member who has this paper
+                            )
+                            doc.metadata["all_authors"] = ", ".join(
+                                str(a) for a in result.authors
+                            )  # Add all authors
+                            doc.metadata["year"] = str(
+                                result.published.year
+                            )  # Use published year from arxiv
+                            doc.metadata["lab"] = lab_name
+                            doc.metadata["source"] = "scholar_crawl"
+
+                        # Add to vector store
+                        vector_store.add_documents(documents=documents, ids=uuids)
+
+                        papers_added += 1
+                        processed_result = True  # Mark as processed
+
+                except requests.exceptions.RequestException as e:
+                    errors.append(
+                        f"Network error processing paper '{paper_title}' by {member_name}: {str(e)}"
+                    )
+                    time.sleep(5)  # Wait longer after a network error
+                except arxiv.arxiv.UnexpectedEmptyPageError as e:
+                    errors.append(
+                        f"arXiv API error (empty page) for paper '{paper_title}' (ID: {arxiv_id}): {str(e)}"
+                    )
+                except arxiv.arxiv.ArxivError as e:
+                    errors.append(
+                        f"arXiv API error for paper '{paper_title}' (ID: {arxiv_id}): {str(e)}"
+                    )
+                except sqlite3.Error as e:
+                    errors.append(
+                        f"Database error for paper '{paper_title}' (ID: {arxiv_id}): {str(e)}"
+                    )
+                except Exception as e:
+                    # Log the full traceback for unexpected errors
+                    import traceback
+
+                    tb_str = traceback.format_exc()
+                    errors.append(
+                        f"Unexpected error processing paper '{paper_title}' by {member_name} (ID: {arxiv_id}): {str(e)}\n{tb_str}"
+                    )
+
+        except requests.exceptions.RequestException as e:
+            errors.append(
+                f"Network error processing scholar page for {member_name}: {str(e)}"
+            )
+            time.sleep(10)  # Wait longer after a scholar page error
+        except Exception as e:
+            import traceback
+
+            tb_str = traceback.format_exc()
+            errors.append(
+                f"Unexpected error processing scholar page for {member_name}: {str(e)}\n{tb_str}"
+            )
+
+    conn.commit()
+    conn.close()
+
+    result = f"Process completed for lab '{lab_name}'. Added {papers_added} new papers."
+    if errors:
+        # Log only a summary of errors if there are too many
+        error_summary = (
+            errors
+            if len(errors) <= 5
+            else errors[:5] + [f"... ({len(errors) - 5} more errors)"]
+        )
+        result += f"\nEncountered {len(errors)} errors. Error summary: {json.dumps(error_summary, indent=2)}"
+
+    return f"Checked for new papers: {result}"
 
 
 @function_tool
@@ -1469,3 +1721,386 @@ def check_new_papers_alt(lab_name: str):
         tb_str = traceback.format_exc()
         conn.close()
         return f"Failed to check for new papers (via Semantic Scholar API): Error: {str(e)}\n{tb_str}"
+
+
+@function_tool
+def summarize_latest_author_paper(lab_name: str, author_name: str, related_papers_count: int = 3):
+    """
+    Find and summarize the latest paper by a specific author in a lab.
+    
+    Args:
+        lab_name: The name of the lab
+        author_name: The name of the author whose latest paper should be summarized
+        related_papers_count: Number of related papers to include for context (default: 3)
+        
+    Returns:
+        A comprehensive summary of the author's latest paper with context from related papers,
+        or an error message if no papers are found
+    """
+    lab_name = lab_name.lower()
+    
+    # Connect to the database
+    conn = sqlite3.connect(SQLITE_DB_PATH)
+    cursor = conn.cursor()
+    
+    # Check if lab exists
+    cursor.execute("SELECT * FROM labs WHERE lab_name = ?", (lab_name,))
+    lab_info = cursor.fetchone()
+    
+    if not lab_info:
+        conn.close()
+        return f"Lab '{lab_name}' does not exist"
+    
+    # Check if the author has papers in this lab
+    cursor.execute(
+        """SELECT paper_id, title, date_added, pdf_path 
+           FROM paper_tracking 
+           WHERE lab_name = ? AND author = ? 
+           ORDER BY date_added DESC 
+           LIMIT 1""",
+        (lab_name, author_name),
+    )
+    
+    latest_paper = cursor.fetchone()
+    
+    if not latest_paper:
+        conn.close()
+        return f"No papers found for author '{author_name}' in lab '{lab_name}'"
+    
+    arxiv_id, title, date_added, pdf_path = latest_paper
+    
+    # Display which paper we're summarizing
+    print(f"Summarizing latest paper by {author_name}: '{title}' (arXiv:{arxiv_id}) from {date_added}")
+    
+    # First, check if the PDF file exists
+    if not os.path.exists(pdf_path):
+        print(f"PDF file not found at recorded path: {pdf_path}")
+        
+        # Create the directory path if it doesn't exist
+        lab_data_dir = os.path.join(DEFAULT_DATA_DIR, lab_name)
+        Path(lab_data_dir).mkdir(parents=True, exist_ok=True)
+        
+        # Try alternative format for the filename
+        safe_arxiv_id = arxiv_id.replace("/", "_").replace(".", "_")
+        alternative_path = os.path.join(lab_data_dir, f"{safe_arxiv_id}.pdf")
+        
+        if os.path.exists(alternative_path):
+            print(f"Found PDF at alternative path: {alternative_path}")
+            pdf_path = alternative_path
+        else:
+            print(f"Attempting to download the paper from arXiv...")
+            
+            try:
+                # Try to download the PDF using arXiv API
+                client = arxiv.Client(num_retries=5, delay_seconds=5)
+                search = arxiv.Search(id_list=[arxiv_id])
+                paper = next(client.results(search), None)
+                
+                if paper:
+                    # Download the PDF
+                    filename = f"{safe_arxiv_id}.pdf"
+                    pdf_path = os.path.join(lab_data_dir, filename)
+                    paper.download_pdf(dirpath=lab_data_dir, filename=filename)
+                    
+                    # Update the database with the new path
+                    cursor.execute(
+                        "UPDATE paper_tracking SET pdf_path = ? WHERE lab_name = ? AND paper_id = ?",
+                        (pdf_path, lab_name, arxiv_id)
+                    )
+                    conn.commit()
+                    
+                    print(f"Successfully downloaded paper to {pdf_path}")
+                else:
+                    conn.close()
+                    return f"Error: Could not find paper with arXiv ID {arxiv_id} on arXiv. The paper might be in the database but is no longer available."
+            except Exception as e:
+                conn.close()
+                return f"Error: Failed to download PDF for arXiv:{arxiv_id}. Please try again later. Details: {str(e)}"
+    
+    # Implementation from generate_paper_summary:
+    try:
+        if not os.path.exists(pdf_path):
+            conn.close()
+            return f"Error: PDF file still not found after recovery attempts. Path: {pdf_path}"
+
+        # Get the ArXiv API client
+        client = arxiv.Client(num_retries=5, delay_seconds=5)
+
+        # First, load the PDF for embedding
+        try:
+            loader = PyPDFLoader(pdf_path)
+            target_paper_docs = loader.load()
+            
+            if not target_paper_docs:
+                conn.close()
+                return f"Error: The PDF file at {pdf_path} appears to be empty or corrupted."
+                
+        except Exception as pdf_error:
+            conn.close()
+            return f"Error: Could not load the PDF file. The file may be corrupted. Details: {str(pdf_error)}"
+
+        # Also get abstract from arXiv API if possible
+        abstract = ""
+        try:
+            # Get paper from ArXiv API
+            search = arxiv.Search(id_list=[arxiv_id])
+            paper = next(client.results(search), None)
+
+            if paper:
+                abstract = paper.summary
+        except Exception as e:
+            print(f"Warning: Error getting abstract from arXiv API: {e}")
+            # Continue without abstract rather than failing completely
+
+        # Combine all page content for searching related papers AND for summarization
+        full_paper_text = "\n\n".join([doc.page_content for doc in target_paper_docs])
+
+        # Use the entire paper for similarity search
+        search_text = full_paper_text
+
+        # Get lab papers collection to find related papers
+        collection_name = f"{lab_name}_papers"
+        lab_related = []
+        try:
+            vector_store = Chroma(
+                collection_name=collection_name,
+                embedding_function=embeddings,
+                persist_directory=CHROMA_PERSIST_DIRECTORY,
+            )
+            lab_related = vector_store.similarity_search(
+                search_text, k=related_papers_count
+            )
+        except Exception as e:
+            print(f"Warning: Error searching lab collection: {e}")
+            # Continue without lab related papers
+
+        # Try to get recommendation collection as well
+        recommendation_collection_name = f"recommendation_for_{lab_name}"
+        recommendation_related = []
+        try:
+            recommendation_store = Chroma(
+                collection_name=recommendation_collection_name,
+                embedding_function=embeddings,
+                persist_directory=CHROMA_PERSIST_DIRECTORY,
+            )
+            recommendation_related = recommendation_store.similarity_search(
+                search_text, k=related_papers_count
+            )
+        except Exception as e:
+            print(f"Warning: Error searching recommendation collection: {e}")
+            # Continue without recommendation related papers
+
+        all_related = lab_related + recommendation_related
+
+        # Extract titles and brief content from related papers, filtering out the target paper
+        related_info = []
+        processed_related_ids = set()
+
+        # Try to get related paper sections from their LaTeX sources
+        for doc in all_related:
+            related_arxiv_id = doc.metadata.get("paper_id")  # paper_id is arxiv_id
+
+            if (
+                related_arxiv_id
+                and related_arxiv_id != arxiv_id
+                and related_arxiv_id not in processed_related_ids
+            ):
+                related_title = doc.metadata.get("title", "Unknown title")
+                related_data = {
+                    "title": related_title,
+                    "arxiv_id": related_arxiv_id,
+                    "content_sample": doc.page_content[:250] + "...",  # Default content
+                }
+
+                # Try to get semantic sections for this related paper
+                try:
+                    # Fetch from ArXiv API
+                    rel_search = arxiv.Search(id_list=[related_arxiv_id])
+                    rel_paper = next(client.results(rel_search), None)
+
+                    if rel_paper:
+                        # We have the related paper - try to get sections from LaTeX
+                        rel_intro = ""
+                        rel_concl = ""
+
+                        with TemporaryDirectory() as rel_tmpdir:
+                            try:
+                                rel_source_path = rel_paper.download_source(
+                                    dirpath=rel_tmpdir
+                                )
+
+                                if rel_source_path and rel_source_path.endswith(
+                                    ".tar.gz"
+                                ):
+                                    with tarfile.open(rel_source_path) as rel_tar:
+                                        rel_tex_files = [
+                                            f
+                                            for f in rel_tar.getnames()
+                                            if f.endswith(".tex")
+                                        ]
+
+                                        if rel_tex_files:
+                                            # Look for main tex file or combine all
+                                            rel_content = ""
+                                            for rel_tex in rel_tex_files:
+                                                try:
+                                                    f = rel_tar.extractfile(rel_tex)
+                                                    if f:
+                                                        content = f.read().decode(
+                                                            "utf-8", errors="ignore"
+                                                        )
+                                                        rel_content += content + "\n\n"
+                                                except Exception as e:
+                                                    print(
+                                                        f"Error reading related tex file {rel_tex}: {e}"
+                                                    )
+
+                                            # Clean content
+                                            rel_content = re.sub(
+                                                r"%.*\n", "\n", rel_content
+                                            )
+
+                                            # Extract introduction and conclusion sections
+                                            rel_intro_match = re.search(
+                                                r"\\section\{(?:Introduction|INTRODUCTION|introduction)\}(.*?)(?:\\section|\\end\{document\}|\\bibliography|\\appendix)",
+                                                rel_content,
+                                                re.DOTALL,
+                                            )
+                                            if rel_intro_match:
+                                                rel_intro = rel_intro_match.group(
+                                                    1
+                                                ).strip()
+                                                # Limit the size of introduction text
+                                                if len(rel_intro) > 500:
+                                                    rel_intro = rel_intro[:500] + "..."
+
+                                            rel_concl_match = re.search(
+                                                r"\\section\{(?:Conclusion|CONCLUSION|conclusion|Conclusions|CONCLUSIONS|conclusions)\}(.*?)(?:\\section|\\end\{document\}|\\bibliography|\\appendix)",
+                                                rel_content,
+                                                re.DOTALL,
+                                            )
+                                            if rel_concl_match:
+                                                rel_concl = rel_concl_match.group(
+                                                    1
+                                                ).strip()
+                                                # Limit the size
+                                                if len(rel_concl) > 500:
+                                                    rel_concl = rel_concl[:500] + "..."
+
+                            except Exception as e:
+                                print(
+                                    f"Error processing LaTeX for related paper {related_arxiv_id}: {e}"
+                                )
+
+                        # If we got sections, use them
+                        if rel_intro or rel_concl:
+                            section_text = ""
+                            if rel_intro:
+                                section_text += "Intro: " + rel_intro + "\n"
+                            if rel_concl:
+                                section_text += "Concl: " + rel_concl
+
+                            # Update the related paper data with sections if we found them
+                            if section_text:
+                                related_data["content_sample"] = (
+                                    section_text[:500] + "..."
+                                )
+
+                except Exception as e:
+                    print(
+                        f"Error getting data for related paper {related_arxiv_id}: {e}"
+                    )
+
+                # Add the related paper to our list
+                related_info.append(related_data)
+                processed_related_ids.add(related_arxiv_id)
+
+        # Prepare the main content for the summarization prompt
+        # For the main paper, we'll use the full text to provide complete information
+        # If the abstract is available, add it at the beginning for context
+        if abstract:
+            prompt_main_content = f"Abstract:\n{abstract}\n\n"
+            prompt_main_content += f"Full Paper Content:\n{full_paper_text}"
+        else:
+            prompt_main_content = f"Full Paper Content:\n{full_paper_text}"
+
+        # Check if the content is too long - if so, we need to truncate intelligently
+        # A typical approach is to keep beginning, important middle parts, and end
+        max_content_length = 25000  # Set a reasonable limit to avoid token overflow
+        if len(prompt_main_content) > max_content_length:
+            first_part = prompt_main_content[: max_content_length // 3]
+            middle_index = len(prompt_main_content) // 2
+            middle_part = prompt_main_content[
+                middle_index
+                - (max_content_length // 6) : middle_index
+                + (max_content_length // 6)
+            ]
+            last_part = prompt_main_content[-max_content_length // 3 :]
+
+            prompt_main_content = f"{first_part}\n\n[...content truncated for length...]\n\n{middle_part}\n\n[...content truncated for length...]\n\n{last_part}"
+
+        # Format summary input with related papers context
+        summary_input = f"""
+Target Paper: {title} (arXiv:{arxiv_id}) by {author_name}
+
+Main Content:
+{prompt_main_content}
+
+---
+Related Papers Context (Top {related_papers_count}):
+"""
+
+        if related_info:
+            for i, related in enumerate(related_info[:related_papers_count]):
+                summary_input += f"{i+1}. {related['title']} (arXiv:{related['arxiv_id']})\n   Sample: {related['content_sample']}\n\n"
+        else:
+            summary_input += "No relevant related papers found in the collections.\n"
+
+        # Use OpenAI to generate summary
+        from langchain_openai import ChatOpenAI
+
+        # Ensure API key is loaded correctly
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            conn.close()
+            return "Error: OPENAI_API_KEY environment variable not set."
+
+        llm = ChatOpenAI(
+            model="gpt-4o", api_key=api_key, temperature=0.3
+        )  # Lower temperature for factual summary
+
+        prompt = f"""
+You are a scientific research assistant AI. Your task is to create a comprehensive, factual, and objective summary of a target academic paper.
+Place the paper in the context of the provided related research snippets.
+
+**Instructions:**
+1.  **Target Paper Focus:** Primarily summarize the target paper: its core problem, methods, key findings, and contributions.
+2.  **Contextualize:** Briefly explain how the target paper relates to the provided related papers.
+3.  **Structure:** Organize the summary logically (Introduction/Problem, Methods, Results, Relation to Context, Conclusion/Significance).
+4.  **Tone:** Maintain an academic, neutral, and objective tone.
+5.  **Length:** Aim for approximately 400-600 words.
+
+**Paper Information & Context:**
+{summary_input}
+
+---
+**Generate the summary now:**
+"""
+
+        try:
+            response = llm.invoke(prompt)
+            summary = response.content
+            conn.close()
+            return summary
+        except Exception as e:
+            conn.close()
+            return f"Error calling OpenAI API for summarization: {str(e)}"
+
+    except FileNotFoundError as fnf_error:
+        conn.close()
+        return f"Error: PDF file not found at {pdf_path}. Specific error: {str(fnf_error)}"
+    except Exception as e:
+        conn.close()
+        import traceback
+        tb_str = traceback.format_exc()
+        return f"Error generating paper summary for arXiv:{arxiv_id}: {str(e)}\n{tb_str}"
