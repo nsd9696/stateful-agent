@@ -11,7 +11,8 @@ from langchain_openai import ChatOpenAI
 from tools.chromadb import (add_pdf_documents, create_collection,
                             query_collection)
 from tools.paper_crawler import (check_new_papers, crawl_scholar_papers,
-                                 generate_paper_summary, recommend_papers)
+                                 generate_paper_summary, recommend_papers,
+                                 crawl_semantic_scholar, check_new_papers_alt)
 from tools.sqlite import (add_lab_member, create_lab, get_all_labs,
                           get_lab_info, get_user_data, insert_user_data,
                           update_lab_website, update_lab_description, add_research_area)
@@ -116,6 +117,8 @@ if __name__ == "__main__":
             query_collection,
             crawl_scholar_papers,
             check_new_papers,
+            crawl_semantic_scholar,
+            check_new_papers_alt,
             recommend_papers,
             generate_paper_summary,
         ],

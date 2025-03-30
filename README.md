@@ -49,7 +49,6 @@ The agent now supports robust academic paper management and recommendation featu
 - Include contextual information from related papers in the lab collection
 - Draw insights from both lab papers and recommended papers
 - Provide academic-style summaries with key findings, methodologies, and relationships to existing research
-- Intelligent content management to handle papers of any length
 
 ## Project Structure
 
