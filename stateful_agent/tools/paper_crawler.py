@@ -497,364 +497,13 @@ def recommend_papers(lab_name: str, time_period_days: int, num_papers: int):
             embedding_function=embeddings,
             persist_directory=CHROMA_PERSIST_DIRECTORY,
         )
-        # Check if the collection actually has embeddings
-        lab_docs = vector_store.get(include=["embeddings"])
-        if not lab_docs or not lab_docs.get("ids") or not lab_docs.get("embeddings"):
-            conn.close()
-            # Be more informative if the collection exists but is empty
-            try:
-                vector_store.peek()  # Check if collection exists
-                return f"Lab collection '{collection_name}' exists but has no papers. Crawl papers first."
-            except:
-                return f"Lab collection '{collection_name}' not found or is empty. Create it and crawl papers first."
-
-        lab_embeddings = lab_docs["embeddings"]
-
-    except Exception as e:
-        conn.close()
-        # Provide more specific feedback if the collection doesn't exist yet
-        return f"Error accessing lab collection '{collection_name}': {str(e)}. Ensure the lab exists and papers have been crawled."
-
-    # Create recommendation tracking table if it doesn't exist (using arxiv_id as paper_id)
-    cursor.execute(
-        """CREATE TABLE IF NOT EXISTS recommendation_tracking
-             (lab_name text, paper_id text, title text, score float, date_added text, 
-             pdf_path text, PRIMARY KEY (lab_name, paper_id))"""
-    )
-
-    # Create recommendation collection if it doesn't exist
-    recommendation_collection_name = f"recommendation_for_{lab_name}"
-    recommendation_store = Chroma(
-        collection_name=recommendation_collection_name,
-        embedding_function=embeddings,
-        persist_directory=CHROMA_PERSIST_DIRECTORY,
-    )
-
-    # Paper abstracts to calculate similarity
-    abstracts = [paper.summary for paper in papers]
-    if not abstracts:
-        conn.close()
-        return "No abstracts found for the retrieved arXiv papers."
-
-    # Calculate embeddings for candidate papers
-    try:
-        paper_embeddings = embeddings.embed_documents(abstracts)
-    except Exception as e:
-        conn.close()
-        return f"Error generating embeddings for candidate papers: {str(e)}"
-
-    # Calculate similarity scores (cosine similarity)
-    similarities = []
-    np_lab_embeddings = np.array(lab_embeddings)
-    # Handle case where lab_embeddings might be empty or malformed
-    if np_lab_embeddings.ndim != 2 or np_lab_embeddings.shape[0] == 0:
-        conn.close()
-        return f"Lab collection '{collection_name}' embeddings are invalid or empty."
-
-    lab_norms = np.linalg.norm(np_lab_embeddings, axis=1)
-    # Prevent division by zero if norms are zero
-    lab_norms[lab_norms == 0] = 1e-9
-
-    for paper_embedding in paper_embeddings:
-        np_paper_embedding = np.array(paper_embedding)
-        paper_norm = np.linalg.norm(np_paper_embedding)
-
-        if paper_norm == 0:
-            # Handle zero vector for candidate paper
-            max_similarity = 0.0
-        else:
-            # Calculate cosine similarity efficiently
-            sim_vector = np.dot(np_lab_embeddings, np_paper_embedding) / (
-                lab_norms * paper_norm
-            )
-            # Use max similarity instead of average for better relevance signal
-            max_similarity = np.max(sim_vector) if sim_vector.size > 0 else 0.0
-        similarities.append(max_similarity)
-
-    if not similarities:
-        # This case should ideally not happen if abstracts exist and embeddings worked
-        conn.close()
-        return "Could not calculate similarity scores."
-
-    # Sort papers by similarity score
-    scored_papers = sorted(zip(papers, similarities), key=lambda x: x[1], reverse=True)
-
-    # Create recommendation directory if it doesn't exist
-    recommendation_dir = os.path.join(DEFAULT_DATA_DIR, "recommendation", lab_name)
-    Path(recommendation_dir).mkdir(parents=True, exist_ok=True)
-
-    # Download and add top N papers
-    papers_added = 0
-    top_papers_result = []
-    errors = []
-    skipped_papers = 0  # Track papers we had to skip
-
-    # Get existing recommended paper IDs to avoid duplicates
-    cursor.execute(
-        "SELECT paper_id FROM recommendation_tracking WHERE lab_name = ?", (lab_name,)
-    )
-    existing_rec_ids = {row[0] for row in cursor.fetchall()}
-
-    # Get existing main lab paper IDs to avoid recommending them
-    cursor.execute(
-        "SELECT paper_id FROM paper_tracking WHERE lab_name = ?", (lab_name,)
-    )
-    existing_lab_paper_ids = {row[0] for row in cursor.fetchall()}
-
-    for paper, score in scored_papers:
-        if papers_added >= num_papers:
-            break  # Stop once we have enough recommendations
-
-        paper_id = paper.get_short_id()  # Use arxiv_id
-
-        # Skip if already recommended OR if it's already in the main lab collection
-        if paper_id in existing_rec_ids or paper_id in existing_lab_paper_ids:
-            skipped_papers += 1
-            continue
-
-        # Use arxiv_id for filename
-        safe_arxiv_id = paper_id.replace("/", "_").replace(".", "_")
-        filename = f"{safe_arxiv_id}.pdf"
-        filepath = os.path.join(recommendation_dir, filename)
-
+        # Try to access the collection without using peek()
         try:
-            # Download the PDF
-            paper.download_pdf(dirpath=recommendation_dir, filename=filename)
-
-            # Add to tracking database
-            current_date = datetime.now().strftime("%Y-%m-%d")
-            cursor.execute(
-                "INSERT INTO recommendation_tracking (lab_name, paper_id, title, score, date_added, pdf_path) VALUES (?, ?, ?, ?, ?, ?)",
-                (lab_name, paper_id, paper.title, float(score), current_date, filepath),
-            )
-
-            # Load and add to recommendation vector store
-            loader = PyPDFLoader(filepath)
-            documents = loader.load()
-
-            uuids = [str(uuid4()) for _ in range(len(documents))]
-
-            # Add metadata
-            for doc in documents:
-                doc.metadata["paper_id"] = paper_id  # arxiv_id
-                doc.metadata["title"] = paper.title
-                doc.metadata["authors"] = ", ".join(
-                    str(author) for author in paper.authors
-                )
-                doc.metadata["score"] = float(score)
-                doc.metadata["lab"] = lab_name
-                doc.metadata["published_date"] = paper.published.strftime("%Y-%m-%d")
-                doc.metadata["source"] = "recommendation"
-
-            # Add to vector store
-            recommendation_store.add_documents(documents=documents, ids=uuids)
-
-            # Add to result list
-            top_papers_result.append(
-                {
-                    "arxiv_id": paper_id,
-                    "title": paper.title,
-                    "authors": [str(author) for author in paper.authors],
-                    "score": float(score),
-                    "published_date": paper.published.strftime("%Y-%m-%d"),
-                    "abstract": (
-                        paper.summary[:300] + "..."
-                        if len(paper.summary) > 300
-                        else paper.summary
-                    ),
-                }
-            )
-
-            papers_added += 1
-
-        except arxiv.arxiv.ArxivError as e:
-            errors.append(
-                f"arXiv error downloading/processing recommended paper {paper_id}: {str(e)}"
-            )
-            # Clean up potentially corrupted file
-            if os.path.exists(filepath):
-                try:
-                    os.remove(filepath)
-                except OSError as rm_err:
-                    print(f"Error removing corrupted file {filepath}: {rm_err}")
-        except sqlite3.Error as e:
-            errors.append(
-                f"Database error adding recommended paper {paper_id}: {str(e)}"
-            )
-            if os.path.exists(filepath):  # Clean up downloaded file if DB fails
-                try:
-                    os.remove(filepath)
-                except OSError as rm_err:
-                    print(f"Error removing file {filepath} after DB error: {rm_err}")
+            # Just try to get one document to verify collection exists
+            vector_store.get(include=["documents"], limit=1)
         except Exception as e:
-            import traceback
-
-            tb_str = traceback.format_exc()
-            errors.append(
-                f"Unexpected error processing recommended paper {paper_id}: {str(e)}\n{tb_str}"
-            )
-            if os.path.exists(filepath):
-                try:
-                    os.remove(filepath)
-                except OSError as rm_err:
-                    print(
-                        f"Error removing file {filepath} after unexpected error: {rm_err}"
-                    )
-
-    conn.commit()
-    conn.close()
-
-    # Create a consistent JSON response regardless of whether papers were added
-    result = {
-        "lab_name": lab_name,
-        "papers_added": papers_added,
-        "skipped_papers": skipped_papers,
-        "recommendations": top_papers_result,
-        "status": "success",
-    }
-
-    # Add appropriate message based on the outcome
-    if not top_papers_result:
-        if scored_papers and skipped_papers > 0:
-            result["message"] = (
-                f"Found {len(scored_papers)} potential papers, but all {skipped_papers} were already recommended or part of the lab collection."
-            )
-            result["status"] = "no_new_recommendations"
-        elif not scored_papers:
-            result["message"] = "No relevant papers found that match the criteria."
-            result["status"] = "no_matches_found"
-        else:
-            result["message"] = (
-                f"Found potential papers, but failed to add any recommendations. Check errors."
-            )
-            result["status"] = "error"
-
-    if errors:
-        result["errors"] = errors[:5]  # Include a summary of errors
-
-    return json.dumps(result, indent=2)
-
-
-@function_tool
-def generate_paper_summary(
-    lab_name: str,
-    author_name: str,
-    paper_title: str = "",
-    arxiv_id_in: str = "",  # Allow specifying arxiv_id directly
-    is_latest: bool = False,
-    related_papers_count: int = 10,
-):
-    """
-    Generate a comprehensive summary for a paper, considering related papers from the lab's collections.
-    Lookup priority: arxiv_id_in > paper_title > is_latest by author_name.
-    Uses arXiv ID as the unique identifier internally.
-    Uses the complete paper content for the target paper being summarized.
-    Uses LaTeX source files (if available) to extract semantic sections from related papers for better context.
-    """
-    lab_name = lab_name.lower()
-
-    conn = sqlite3.connect(SQLITE_DB_PATH)
-    cursor = conn.cursor()
-
-    # Check if lab exists
-    cursor.execute("SELECT * FROM labs WHERE lab_name = ?", (lab_name,))
-    lab_info = cursor.fetchone()
-
-    if not lab_info:
-        conn.close()
-        return f"Lab '{lab_name}' does not exist"
-
-    # Find the target paper's info (arxiv_id, title, pdf_path)
-    paper_info = None
-    target_arxiv_id = None
-
-    if arxiv_id_in:
-        # Lookup by provided arxiv_id
-        cursor.execute(
-            "SELECT paper_id, title, pdf_path, author FROM paper_tracking WHERE lab_name = ? AND paper_id = ?",
-            (lab_name, arxiv_id_in),
-        )
-        paper_info = cursor.fetchone()
-        if paper_info:
-            target_arxiv_id = paper_info[0]
-        else:
-            # Maybe it's in recommendations?
-            cursor.execute(
-                "SELECT paper_id, title, pdf_path FROM recommendation_tracking WHERE lab_name = ? AND paper_id = ?",
-                (lab_name, arxiv_id_in),
-            )
-            rec_info = cursor.fetchone()
-            if rec_info:
-                paper_info = (
-                    rec_info[0],
-                    rec_info[1],
-                    rec_info[2],
-                    "N/A - Recommended",
-                )  # Author not stored here
-                target_arxiv_id = rec_info[0]
-
-    elif paper_title:
-        # Search by paper title (less reliable) - find the best match's arxiv_id
-        # Use `author_name` to narrow down if provided
-        query = "SELECT paper_id, title, pdf_path, author FROM paper_tracking WHERE lab_name = ? AND title LIKE ?"
-        params = [lab_name, f"%{paper_title}%"]
-        if author_name:
-            query += " AND author = ?"
-            params.append(author_name)
-        query += (
-            " ORDER BY date_added DESC LIMIT 1"  # Prioritize recent if multiple matches
-        )
-
-        cursor.execute(query, tuple(params))
-        paper_info = cursor.fetchone()
-        if paper_info:
-            target_arxiv_id = paper_info[0]
-            # Verify author if not used in query
-            if not author_name:
-                author_name = paper_info[3]
-
-    elif is_latest and author_name:
-        # Get the latest paper by author
-        cursor.execute(
-            "SELECT paper_id, title, pdf_path, author FROM paper_tracking WHERE lab_name = ? AND author = ? ORDER BY date_added DESC LIMIT 1",
-            (lab_name, author_name),
-        )
-        paper_info = cursor.fetchone()
-        if paper_info:
-            target_arxiv_id = paper_info[0]
-
-    else:
-        conn.close()
-        return "Please provide either an arxiv_id, a paper title (optionally with author), or set is_latest=True with an author_name."
-
-    if not paper_info or not target_arxiv_id:
-        search_criteria = (
-            f"arxiv_id '{arxiv_id_in}'"
-            if arxiv_id_in
-            else (
-                f"title '{paper_title}'"
-                if paper_title
-                else f"latest by '{author_name}'"
-            )
-        )
-        conn.close()
-        return f"No paper found matching criteria ({search_criteria}) in lab '{lab_name}' tracked papers or recommendations."
-
-    # We found the paper, extract details
-    title, pdf_path = paper_info[1], paper_info[2]
-    # Author might be N/A if found in recommendations only
-    found_author = paper_info[3] if len(paper_info) > 3 else "N/A"
-
-    # Access lab paper collection
-    collection_name = f"{lab_name}_papers"
-    try:
-        vector_store = Chroma(
-            collection_name=collection_name,
-            embedding_function=embeddings,
-            persist_directory=CHROMA_PERSIST_DIRECTORY,
-        )
-        # Verify collection exists
-        vector_store.peek()
+            vector_store = None
+            print(f"Warning: Could not access lab collection '{collection_name}': {str(e)}")
     except Exception as e:
         # Don't fail completely, maybe only recommendations exist
         vector_store = None
@@ -868,8 +517,15 @@ def generate_paper_summary(
             embedding_function=embeddings,
             persist_directory=CHROMA_PERSIST_DIRECTORY,
         )
-        # Verify collection exists
-        recommendation_store.peek()
+        # Try to access the collection without using peek()
+        try:
+            # Just try to get one document to verify collection exists
+            recommendation_store.get(include=["documents"], limit=1)
+        except Exception as e:
+            recommendation_store = None
+            print(
+                f"Warning: Could not access recommendation collection '{recommendation_collection_name}': {str(e)}"
+            )
     except Exception as e:
         recommendation_store = None
         print(
@@ -880,7 +536,416 @@ def generate_paper_summary(
         conn.close()
         return f"Neither lab paper collection nor recommendation collection found for lab '{lab_name}'."
 
-    # Load target paper content and attempt to get LaTeX source
+    # Create directory for recommendation files if it doesn't exist
+    recommendation_dir = os.path.join(DEFAULT_DATA_DIR, "recommendation", lab_name)
+    Path(recommendation_dir).mkdir(parents=True, exist_ok=True)
+
+    # Process and score the papers - for now just based on recency and matching categories
+    # In the future could add more sophisticated relevance scoring
+    scored_papers = []
+    
+    # Check if the papers already exist in the database to avoid duplicates
+    existing_paper_ids = set()
+    cursor.execute(
+        "SELECT paper_id FROM paper_tracking WHERE lab_name = ?",
+        (lab_name,),
+    )
+    for row in cursor.fetchall():
+        existing_paper_ids.add(row[0])
+
+    # Score the papers that don't already exist
+    for paper in papers:
+        arxiv_id = paper.get_short_id()
+        if arxiv_id in existing_paper_ids:
+            continue  # Skip papers already in the database
+            
+        # Basic scoring based on recency
+        date_score = 1.0  # All papers are within the requested time range
+        
+        # Calculate overall score (can be expanded with more factors)
+        score = date_score
+        
+        scored_papers.append((paper, score))
+    
+    # Sort by score (highest first)
+    scored_papers.sort(key=lambda x: x[1], reverse=True)
+    
+    # Take top N papers as requested
+    recommended_papers = scored_papers[:num_papers]
+    
+    if not recommended_papers:
+        conn.close()
+        return f"No new papers found matching the research areas of lab '{lab_name}' in the last {time_period_days} days."
+    
+    # Download and add the recommended papers to the recommendation collection
+    papers_added = []
+    
+    for paper, score in recommended_papers:
+        arxiv_id = paper.get_short_id()
+        
+        try:
+            # Use arxiv_id for filename
+            safe_arxiv_id = arxiv_id.replace("/", "_").replace(".", "_")
+            filename = f"{safe_arxiv_id}.pdf"
+            filepath = os.path.join(recommendation_dir, filename)
+            
+            # Download the PDF if it doesn't exist already
+            if not os.path.exists(filepath):
+                paper.download_pdf(dirpath=recommendation_dir, filename=filename)
+            
+            # Add to tracking database
+            current_date = datetime.now().strftime("%Y-%m-%d")
+            
+            # Insert with 'recommendation' as author to distinguish from lab member papers
+            cursor.execute(
+                "INSERT OR IGNORE INTO paper_tracking (lab_name, paper_id, title, author, date_added, pdf_path) VALUES (?, ?, ?, ?, ?, ?)",
+                (lab_name, arxiv_id, paper.title, "recommendation", current_date, filepath),
+            )
+            
+            # Add to vector database if recommendation store exists
+            if recommendation_store:
+                # Load PDF
+                loader = PyPDFLoader(filepath)
+                documents = loader.load()
+                
+                # Generate UUIDs
+                uuids = [str(uuid4()) for _ in range(len(documents))]
+                
+                # Add metadata
+                for doc in documents:
+                    doc.metadata["paper_id"] = arxiv_id
+                    doc.metadata["title"] = paper.title
+                    doc.metadata["author"] = "recommendation"
+                    doc.metadata["all_authors"] = ", ".join(str(a) for a in paper.authors)
+                    doc.metadata["year"] = str(paper.published.year)
+                    doc.metadata["lab"] = lab_name
+                    doc.metadata["source"] = "recommendation"
+                
+                # Add to vector store
+                recommendation_store.add_documents(documents=documents, ids=uuids)
+            
+            # Add to result list
+            paper_info = {
+                "title": paper.title,
+                "authors": ", ".join(str(a) for a in paper.authors),
+                "arxiv_id": arxiv_id,
+                "abstract": paper.summary[:300] + "..." if len(paper.summary) > 300 else paper.summary,
+                "url": f"https://arxiv.org/abs/{arxiv_id}",
+                "score": score
+            }
+            papers_added.append(paper_info)
+            
+        except Exception as e:
+            print(f"Error processing recommended paper {arxiv_id}: {e}")
+    
+    conn.commit()
+    conn.close()
+    
+    # Format the recommendation response
+    if not papers_added:
+        return f"No new papers could be added for lab '{lab_name}'. All matching papers are already in the database or couldn't be processed."
+    
+    result = f"Recommended papers for lab '{lab_name}' (from the last {time_period_days} days):\n\n"
+    
+    for i, paper in enumerate(papers_added):
+        result += f"{i+1}. {paper['title']}\n"
+        result += f"   Authors: {paper['authors']}\n"
+        result += f"   arXiv: {paper['arxiv_id']} - {paper['url']}\n"
+        result += f"   Abstract: {paper['abstract']}\n\n"
+    
+    return result
+
+
+@function_tool
+def crawl_semantic_scholar(lab_name: str):
+    """
+    Crawl Semantic Scholar API for lab members and download their arXiv papers.
+    Creates a collection for the lab and adds paper embeddings to the vector database.
+    
+    This function is an alternative to crawl_scholar_papers that uses the official Semantic Scholar API
+    instead of scraping Google Scholar, avoiding rate limits and CAPTCHA issues.
+    """
+    lab_name = lab_name.lower()
+
+    # Not directly calling crawl_semantic_scholar, but using the same implementation
+    # Retrieve lab information
+    conn = sqlite3.connect(SQLITE_DB_PATH)
+    cursor = conn.cursor()
+
+    # Check if lab exists
+    cursor.execute("SELECT * FROM labs WHERE lab_name = ?", (lab_name,))
+    lab_info = cursor.fetchone()
+
+    if not lab_info:
+        conn.close()
+        return f"Lab '{lab_name}' does not exist"
+
+    # Get lab members - we'll need to work with their names instead of Scholar URLs
+    cursor.execute(
+        "SELECT member_name, scholar_url FROM lab_members WHERE lab_name = ?",
+        (lab_name,),
+    )
+    members = cursor.fetchall()
+
+    if not members:
+        conn.close()
+        return f"No members found for lab '{lab_name}'"
+
+    # Create paper_tracking table if it doesn't exist (using arxiv_id as paper_id)
+    cursor.execute(
+        """CREATE TABLE IF NOT EXISTS paper_tracking
+             (lab_name text, paper_id text, title text, author text, date_added text, 
+             pdf_path text, PRIMARY KEY (lab_name, paper_id))"""
+    )
+
+    # Create a collection for the lab if it doesn't exist
+    collection_name = f"{lab_name}_papers"
+    vector_store = Chroma(
+        collection_name=collection_name,
+        embedding_function=embeddings,
+        persist_directory=CHROMA_PERSIST_DIRECTORY,
+    )
+
+    papers_added = 0
+    errors = []
+
+    # Lab data directory
+    lab_data_dir = os.path.join(DEFAULT_DATA_DIR, lab_name)
+    Path(lab_data_dir).mkdir(parents=True, exist_ok=True)
+    
+    # Base URL for Semantic Scholar API
+    semantic_scholar_base_url = "https://api.semanticscholar.org/graph/v1"
+    
+    # Optional - get your own API key at https://www.semanticscholar.org/product/api
+    # If not provided, will be limited to 100 requests/5min without key
+    semantic_scholar_api_key = os.getenv("SEMANTIC_SCHOLAR_API_KEY", "")
+    
+    # Headers for API requests
+    headers = {
+        "Accept": "application/json",
+    }
+    if semantic_scholar_api_key:
+        headers["x-api-key"] = semantic_scholar_api_key
+    
+    for member_name, _ in members:
+        # Use member name to search for author
+        print(f"Searching for papers by {member_name} on Semantic Scholar...")
+        
+        try:
+            # First, find the author by name
+            author_search_url = f"{semantic_scholar_base_url}/author/search"
+            author_params = {
+                "query": member_name,
+                "fields": "authorId,name,affiliations,paperCount",
+                "limit": 3  # Get top 3 matches
+            }
+            
+            author_response = requests.get(
+                author_search_url, 
+                headers=headers, 
+                params=author_params,
+                timeout=30
+            )
+            author_response.raise_for_status()
+            author_data = author_response.json()
+            
+            # Find the most likely author match
+            if not author_data.get('data') or len(author_data['data']) == 0:
+                errors.append(f"Could not find author {member_name} on Semantic Scholar")
+                continue
+                
+            # Find the best match - could refine this logic based on affiliations if needed
+            author = author_data['data'][0]
+            author_id = author['authorId']
+            
+            # Wait to avoid hitting rate limits
+            time.sleep(2)
+            
+            # Get papers by this author
+            papers_url = f"{semantic_scholar_base_url}/author/{author_id}/papers"
+            papers_params = {
+                "fields": "paperId,externalIds,title,abstract,year,authors,url,venue,publicationDate",
+                "limit": 100
+            }
+            
+            papers_response = requests.get(
+                papers_url, 
+                headers=headers, 
+                params=papers_params,
+                timeout=30
+            )
+            papers_response.raise_for_status()
+            papers_data = papers_response.json()
+            
+            if not papers_data.get('data'):
+                errors.append(f"No papers found for author {member_name} (ID: {author_id})")
+                continue
+                
+            # Process each paper
+            print(f"Found {len(papers_data['data'])} papers for {member_name}")
+            for i, paper in enumerate(papers_data['data']):
+                # Get the arXiv ID if available
+                arxiv_id = None
+                if paper.get('externalIds') and paper['externalIds'].get('ArXiv'):
+                    arxiv_id = paper['externalIds']['ArXiv']
+                
+                # Skip papers without arXiv ID
+                if not arxiv_id:
+                    continue
+                
+                paper_title = paper.get('title', 'Unknown Title')
+                print(f"Processing paper: {paper_title} (arXiv:{arxiv_id})")
+                
+                # Use arxiv_id as the unique paper identifier
+                paper_id = arxiv_id
+                
+                # Check if paper already exists in the database
+                cursor.execute(
+                    "SELECT * FROM paper_tracking WHERE lab_name = ? AND paper_id = ?",
+                    (lab_name, paper_id),
+                )
+                existing_paper = cursor.fetchone()
+                
+                if existing_paper:
+                    print(f"Paper with arXiv ID {arxiv_id} already exists in the database. Skipping.")
+                    continue
+                
+                # Throttle requests to avoid hitting rate limits
+                if i > 0 and i % 5 == 0:
+                    print("Pausing briefly to avoid rate limits...")
+                    time.sleep(5)
+                
+                try:
+                    # Download the paper using the arxiv API
+                    client = arxiv.Client(num_retries=5, delay_seconds=5)
+                    search = arxiv.Search(id_list=[arxiv_id])
+                    
+                    # Get the arxiv paper
+                    result = next(client.results(search), None)
+                    
+                    if not result:
+                        errors.append(f"Could not find paper with arXiv ID {arxiv_id} via arXiv API")
+                        continue
+                    
+                    # Use arxiv_id for filename
+                    safe_arxiv_id = arxiv_id.replace("/", "_").replace(".", "_")
+                    filename = f"{safe_arxiv_id}.pdf"
+                    filepath = os.path.join(lab_data_dir, filename)
+                    
+                    # Download the PDF
+                    result.download_pdf(dirpath=lab_data_dir, filename=filename)
+                    
+                    # Add to tracking database
+                    current_date = datetime.now().strftime("%Y-%m-%d")
+                    cursor.execute(
+                        "INSERT INTO paper_tracking (lab_name, paper_id, title, author, date_added, pdf_path) VALUES (?, ?, ?, ?, ?, ?)",
+                        (lab_name, paper_id, result.title, member_name, current_date, filepath),
+                    )
+                    
+                    # Load and add to vector database
+                    loader = PyPDFLoader(filepath)
+                    documents = loader.load()
+                    
+                    # Generate UUIDs for each document chunk
+                    uuids = [str(uuid4()) for _ in range(len(documents))]
+                    
+                    # Add metadata
+                    for doc in documents:
+                        doc.metadata["paper_id"] = paper_id  # This is arxiv_id
+                        doc.metadata["title"] = result.title
+                        doc.metadata["author"] = member_name
+                        doc.metadata["all_authors"] = ", ".join(
+                            str(a) for a in result.authors
+                        )
+                        doc.metadata["year"] = str(
+                            result.published.year
+                        )
+                        doc.metadata["lab"] = lab_name
+                        doc.metadata["source"] = "semantic_scholar_api"
+                    
+                    # Add to vector store
+                    vector_store.add_documents(documents=documents, ids=uuids)
+                    
+                    papers_added += 1
+                    print(f"Successfully added paper '{result.title}' to database.")
+                    
+                except arxiv.arxiv.ArxivError as e:
+                    errors.append(f"arXiv API error for paper '{paper_title}' (ID: {arxiv_id}): {str(e)}")
+                    time.sleep(5)  # wait before continuing
+                except Exception as e:
+                    import traceback
+                    tb_str = traceback.format_exc()
+                    errors.append(f"Error processing paper '{paper_title}' (ID: {arxiv_id}): {str(e)}\n{tb_str}")
+            
+            # Wait between authors to avoid hitting rate limits
+            time.sleep(10)
+            
+        except requests.exceptions.RequestException as e:
+            errors.append(f"Network error accessing Semantic Scholar API for {member_name}: {str(e)}")
+            time.sleep(10)
+        except Exception as e:
+            import traceback
+            tb_str = traceback.format_exc()
+            errors.append(f"Unexpected error processing papers for {member_name}: {str(e)}\n{tb_str}")
+    
+    conn.commit()
+    conn.close()
+    
+    result = f"Process completed for lab '{lab_name}'. Added {papers_added} new papers."
+    if errors:
+        # Log only a summary of errors if there are too many
+        error_summary = (
+            errors
+            if len(errors) <= 5
+            else errors[:5] + [f"... ({len(errors) - 5} more errors)"]
+        )
+        result += f"\nEncountered {len(errors)} errors. Error summary: {json.dumps(error_summary, indent=2)}"
+    
+    return result
+
+
+@function_tool
+def generate_paper_summary(lab_name: str, arxiv_id: str, related_papers_count: int = 3):
+    """
+    Generate a comprehensive summary of a paper with arXiv ID, including context from related papers.
+    
+    Args:
+        lab_name: The name of the lab that the paper belongs to
+        arxiv_id: The arXiv ID of the paper to summarize
+        related_papers_count: Number of related papers to include for context (default: 3)
+        
+    Returns:
+        A comprehensive summary of the paper with context from related papers
+    """
+    lab_name = lab_name.lower()
+    
+    # Connect to the database
+    conn = sqlite3.connect(SQLITE_DB_PATH)
+    cursor = conn.cursor()
+
+    # Check if lab exists
+    cursor.execute("SELECT * FROM labs WHERE lab_name = ?", (lab_name,))
+    lab_info = cursor.fetchone()
+
+    if not lab_info:
+        conn.close()
+        return f"Lab '{lab_name}' does not exist"
+    
+    # Check if we have the paper in our database
+    target_arxiv_id = arxiv_id.strip()
+    cursor.execute(
+        "SELECT paper_id, title, author, pdf_path FROM paper_tracking WHERE lab_name = ? AND paper_id = ?",
+        (lab_name, target_arxiv_id),
+    )
+    paper_info = cursor.fetchone()
+    
+    if not paper_info:
+        conn.close()
+        return f"Could not find paper with arXiv ID {target_arxiv_id} in lab collection"
+    
+    # Extract paper info
+    _, title, found_author, pdf_path = paper_info
+    
     try:
         if not os.path.exists(pdf_path):
             conn.close()
@@ -911,24 +976,35 @@ def generate_paper_summary(
         # Use the entire paper for similarity search
         search_text = full_paper_text
 
-        # Use paper content to find related papers
+        # Get lab papers collection to find related papers
+        collection_name = f"{lab_name}_papers"
         lab_related = []
-        if vector_store:
-            try:
-                lab_related = vector_store.similarity_search(
-                    search_text, k=related_papers_count
-                )
-            except Exception as e:
-                print(f"Error searching lab collection: {e}")
+        try:
+            vector_store = Chroma(
+                collection_name=collection_name,
+                embedding_function=embeddings,
+                persist_directory=CHROMA_PERSIST_DIRECTORY,
+            )
+            lab_related = vector_store.similarity_search(
+                search_text, k=related_papers_count
+            )
+        except Exception as e:
+            print(f"Error searching lab collection: {e}")
 
+        # Try to get recommendation collection as well
+        recommendation_collection_name = f"recommendation_for_{lab_name}"
         recommendation_related = []
-        if recommendation_store:
-            try:
-                recommendation_related = recommendation_store.similarity_search(
-                    search_text, k=related_papers_count
-                )
-            except Exception as e:
-                print(f"Error searching recommendation collection: {e}")
+        try:
+            recommendation_store = Chroma(
+                collection_name=recommendation_collection_name,
+                embedding_function=embeddings,
+                persist_directory=CHROMA_PERSIST_DIRECTORY,
+            )
+            recommendation_related = recommendation_store.similarity_search(
+                search_text, k=related_papers_count
+            )
+        except Exception as e:
+            print(f"Error searching recommendation collection: {e}")
 
         all_related = lab_related + recommendation_related
 
@@ -1115,86 +1191,10 @@ Place the paper in the context of the provided related research snippets.
 
 **Instructions:**
 1.  **Target Paper Focus:** Primarily summarize the target paper: its core problem, methods, key findings, and contributions.
-2.  **Contextualize:** Briefly explain how the target paper relates to the provided related papers (e.g., builds upon, contrasts with, addresses similar problems). Use the provided snippets for context, but do *not* summarize the related papers themselves in detail.
-3.  **Structure:** Organize the summary logically (e.g., Introduction/Problem, Methods, Results, Relation to Context, Conclusion/Significance).
-4.  **Tone:** Maintain an academic, neutral, and objective tone. Avoid speculation or personal opinions.
-5.  **Length:** Aim for approximately 400-800 words.
-
-**Paper Information & Context:**
-{summary_input}
-
----
-**Generate the summary now:**
-"""
-
-        # Estimate token count and potentially truncate prompt if needed (basic example)
-        # Note: This is a rough estimate, actual tokenization varies.
-        estimated_tokens = len(prompt.split()) * 1.3
-        # print(f"Estimated prompt tokens: {estimated_tokens}")
-        if estimated_tokens > 100000:
-            conn.close()
-            # Implement smarter truncation by reducing the paper content while preserving structure
-            max_summary_input_length = 50000
-            if len(summary_input) > max_summary_input_length:
-                # Keep abstract and beginning intact
-                parts = summary_input.split("Main Content:")
-                header = parts[0] + "Main Content:\n"
-
-                # Extract abstract if it exists
-                abstract_section = ""
-                if "Abstract:" in parts[1]:
-                    abstract_end = parts[1].find("\n\nFull Paper Content:")
-                    if abstract_end > 0:
-                        abstract_section = parts[1][
-                            : abstract_end + 2
-                        ]  # Keep the abstract
-                        main_content = parts[1][abstract_end + 2 :]
-                    else:
-                        main_content = parts[1]
-                else:
-                    main_content = parts[1]
-
-                # Find the related papers section
-                related_start = main_content.find("---\nRelated Papers Context")
-                if related_start > 0:
-                    paper_content = main_content[:related_start]
-                    related_section = main_content[related_start:]
-                else:
-                    paper_content = main_content
-                    related_section = ""
-
-                # Truncate the paper content while preserving structure
-                max_paper_length = (
-                    max_summary_input_length
-                    - len(header)
-                    - len(abstract_section)
-                    - len(related_section)
-                    - 100
-                )
-                if len(paper_content) > max_paper_length:
-                    first_part = paper_content[: max_paper_length // 3]
-                    last_part = paper_content[-max_paper_length // 3 :]
-                    truncated_content = f"{first_part}\n\n[...content truncated for length...]\n\n{last_part}"
-                else:
-                    truncated_content = paper_content
-
-                # Rebuild the summary input
-                summary_input = (
-                    header + abstract_section + truncated_content + related_section
-                )
-
-                # Update the prompt
-                prompt = f"""
-You are a scientific research assistant AI. Your task is to create a comprehensive, factual, and objective summary of a target academic paper.
-Place the paper in the context of the provided related research snippets.
-
-**Instructions:**
-1.  **Target Paper Focus:** Primarily summarize the target paper: its core problem, methods, key findings, and contributions.
-2.  **Contextualize:** Briefly explain how the target paper relates to the provided related papers (e.g., builds upon, contrasts with, addresses similar problems). Use the provided snippets for context, but do *not* summarize the related papers themselves in detail.
-3.  **Structure:** Organize the summary logically (e.g., Introduction/Problem, Methods, Results, Relation to Context, Conclusion/Significance).
-4.  **Tone:** Maintain an academic, neutral, and objective tone. Avoid speculation or personal opinions.
+2.  **Contextualize:** Briefly explain how the target paper relates to the provided related papers.
+3.  **Structure:** Organize the summary logically (Introduction/Problem, Methods, Results, Relation to Context, Conclusion/Significance).
+4.  **Tone:** Maintain an academic, neutral, and objective tone.
 5.  **Length:** Aim for approximately 400-600 words.
-6.  **Note:** The paper content has been partially truncated for length. Focus on the available information to create the best summary possible.
 
 **Paper Information & Context:**
 {summary_input}
@@ -1206,12 +1206,11 @@ Place the paper in the context of the provided related research snippets.
         try:
             response = llm.invoke(prompt)
             summary = response.content
+            conn.close()
+            return summary
         except Exception as e:
             conn.close()
             return f"Error calling OpenAI API for summarization: {str(e)}"
-
-        conn.close()
-        return summary
 
     except FileNotFoundError:
         conn.close()
@@ -1219,256 +1218,8 @@ Place the paper in the context of the provided related research snippets.
     except Exception as e:
         conn.close()
         import traceback
-
         tb_str = traceback.format_exc()
         return f"Error generating paper summary for arXiv:{target_arxiv_id}: {str(e)}\n{tb_str}"
-
-
-@function_tool
-def crawl_semantic_scholar(lab_name: str):
-    """
-    Crawl Semantic Scholar API for lab members and download their arXiv papers.
-    Creates a collection for the lab and adds paper embeddings to the vector database.
-    
-    This function is an alternative to crawl_scholar_papers that uses the official Semantic Scholar API
-    instead of scraping Google Scholar, avoiding rate limits and CAPTCHA issues.
-    """
-    lab_name = lab_name.lower()
-
-    # Get lab info from database
-    conn = sqlite3.connect(SQLITE_DB_PATH)
-    cursor = conn.cursor()
-
-    # Check if lab exists
-    cursor.execute("SELECT * FROM labs WHERE lab_name = ?", (lab_name,))
-    lab_info = cursor.fetchone()
-
-    if not lab_info:
-        conn.close()
-        return f"Lab '{lab_name}' does not exist"
-
-    # Get lab members - we'll need to work with their names instead of Scholar URLs
-    cursor.execute(
-        "SELECT member_name, scholar_url FROM lab_members WHERE lab_name = ?",
-        (lab_name,),
-    )
-    members = cursor.fetchall()
-
-    if not members:
-        conn.close()
-        return f"No members found for lab '{lab_name}'"
-
-    # Create paper_tracking table if it doesn't exist (using arxiv_id as paper_id)
-    cursor.execute(
-        """CREATE TABLE IF NOT EXISTS paper_tracking
-             (lab_name text, paper_id text, title text, author text, date_added text, 
-             pdf_path text, PRIMARY KEY (lab_name, paper_id))"""
-    )
-
-    # Create a collection for the lab if it doesn't exist
-    collection_name = f"{lab_name}_papers"
-    vector_store = Chroma(
-        collection_name=collection_name,
-        embedding_function=embeddings,
-        persist_directory=CHROMA_PERSIST_DIRECTORY,
-    )
-
-    papers_added = 0
-    errors = []
-
-    # Lab data directory
-    lab_data_dir = os.path.join(DEFAULT_DATA_DIR, lab_name)
-    Path(lab_data_dir).mkdir(parents=True, exist_ok=True)
-    
-    # Base URL for Semantic Scholar API
-    semantic_scholar_base_url = "https://api.semanticscholar.org/graph/v1"
-    
-    # Optional - get your own API key at https://www.semanticscholar.org/product/api
-    # If not provided, will be limited to 100 requests/5min without key
-    semantic_scholar_api_key = os.getenv("SEMANTIC_SCHOLAR_API_KEY", "")
-    
-    # Headers for API requests
-    headers = {
-        "Accept": "application/json",
-    }
-    if semantic_scholar_api_key:
-        headers["x-api-key"] = semantic_scholar_api_key
-    
-    for member_name, _ in members:
-        # Use member name to search for author
-        print(f"Searching for papers by {member_name} on Semantic Scholar...")
-        
-        try:
-            # First, find the author by name
-            author_search_url = f"{semantic_scholar_base_url}/author/search"
-            author_params = {
-                "query": member_name,
-                "fields": "authorId,name,affiliations,paperCount",
-                "limit": 3  # Get top 3 matches
-            }
-            
-            author_response = requests.get(
-                author_search_url, 
-                headers=headers, 
-                params=author_params,
-                timeout=30
-            )
-            author_response.raise_for_status()
-            author_data = author_response.json()
-            
-            # Find the most likely author match
-            if not author_data.get('data') or len(author_data['data']) == 0:
-                errors.append(f"Could not find author {member_name} on Semantic Scholar")
-                continue
-                
-            # Find the best match - could refine this logic based on affiliations if needed
-            author = author_data['data'][0]
-            author_id = author['authorId']
-            
-            # Wait to avoid hitting rate limits
-            time.sleep(2)
-            
-            # Get papers by this author
-            papers_url = f"{semantic_scholar_base_url}/author/{author_id}/papers"
-            papers_params = {
-                "fields": "paperId,externalIds,title,abstract,year,authors,url,venue,publicationDate",
-                "limit": 100
-            }
-            
-            papers_response = requests.get(
-                papers_url, 
-                headers=headers, 
-                params=papers_params,
-                timeout=30
-            )
-            papers_response.raise_for_status()
-            papers_data = papers_response.json()
-            
-            if not papers_data.get('data'):
-                errors.append(f"No papers found for author {member_name} (ID: {author_id})")
-                continue
-                
-            # Process each paper
-            print(f"Found {len(papers_data['data'])} papers for {member_name}")
-            for i, paper in enumerate(papers_data['data']):
-                # Get the arXiv ID if available
-                arxiv_id = None
-                if paper.get('externalIds') and paper['externalIds'].get('ArXiv'):
-                    arxiv_id = paper['externalIds']['ArXiv']
-                
-                # Skip papers without arXiv ID
-                if not arxiv_id:
-                    continue
-                
-                paper_title = paper.get('title', 'Unknown Title')
-                print(f"Processing paper: {paper_title} (arXiv:{arxiv_id})")
-                
-                # Use arxiv_id as the unique paper identifier
-                paper_id = arxiv_id
-                
-                # Check if paper already exists in the database
-                cursor.execute(
-                    "SELECT * FROM paper_tracking WHERE lab_name = ? AND paper_id = ?",
-                    (lab_name, paper_id),
-                )
-                existing_paper = cursor.fetchone()
-                
-                if existing_paper:
-                    print(f"Paper with arXiv ID {arxiv_id} already exists in the database. Skipping.")
-                    continue
-                
-                # Throttle requests to avoid hitting rate limits
-                if i > 0 and i % 5 == 0:
-                    print("Pausing briefly to avoid rate limits...")
-                    time.sleep(5)
-                
-                try:
-                    # Download the paper using the arxiv API
-                    client = arxiv.Client(num_retries=5, delay_seconds=5)
-                    search = arxiv.Search(id_list=[arxiv_id])
-                    
-                    # Get the arxiv paper
-                    result = next(client.results(search), None)
-                    
-                    if not result:
-                        errors.append(f"Could not find paper with arXiv ID {arxiv_id} via arXiv API")
-                        continue
-                    
-                    # Use arxiv_id for filename
-                    safe_arxiv_id = arxiv_id.replace("/", "_").replace(".", "_")
-                    filename = f"{safe_arxiv_id}.pdf"
-                    filepath = os.path.join(lab_data_dir, filename)
-                    
-                    # Download the PDF
-                    result.download_pdf(dirpath=lab_data_dir, filename=filename)
-                    
-                    # Add to tracking database
-                    current_date = datetime.now().strftime("%Y-%m-%d")
-                    cursor.execute(
-                        "INSERT INTO paper_tracking (lab_name, paper_id, title, author, date_added, pdf_path) VALUES (?, ?, ?, ?, ?, ?)",
-                        (lab_name, paper_id, result.title, member_name, current_date, filepath),
-                    )
-                    
-                    # Load and add to vector database
-                    loader = PyPDFLoader(filepath)
-                    documents = loader.load()
-                    
-                    # Generate UUIDs for each document chunk
-                    uuids = [str(uuid4()) for _ in range(len(documents))]
-                    
-                    # Add metadata including arxiv_id
-                    for doc in documents:
-                        doc.metadata["paper_id"] = paper_id  # This is arxiv_id
-                        doc.metadata["title"] = result.title
-                        doc.metadata["author"] = member_name
-                        doc.metadata["all_authors"] = ", ".join(
-                            str(a) for a in result.authors
-                        )
-                        doc.metadata["year"] = str(
-                            result.published.year
-                        )
-                        doc.metadata["lab"] = lab_name
-                        doc.metadata["source"] = "semantic_scholar_api"
-                    
-                    # Add to vector store
-                    vector_store.add_documents(documents=documents, ids=uuids)
-                    
-                    papers_added += 1
-                    print(f"Successfully added paper '{result.title}' to database.")
-                    
-                except arxiv.arxiv.ArxivError as e:
-                    errors.append(f"arXiv API error for paper '{paper_title}' (ID: {arxiv_id}): {str(e)}")
-                    time.sleep(5)  # wait before continuing
-                except Exception as e:
-                    import traceback
-                    tb_str = traceback.format_exc()
-                    errors.append(f"Error processing paper '{paper_title}' (ID: {arxiv_id}): {str(e)}\n{tb_str}")
-            
-            # Wait between authors to avoid hitting rate limits
-            time.sleep(10)
-            
-        except requests.exceptions.RequestException as e:
-            errors.append(f"Network error accessing Semantic Scholar API for {member_name}: {str(e)}")
-            time.sleep(10)
-        except Exception as e:
-            import traceback
-            tb_str = traceback.format_exc()
-            errors.append(f"Unexpected error processing papers for {member_name}: {str(e)}\n{tb_str}")
-    
-    conn.commit()
-    conn.close()
-    
-    result = f"Process completed for lab '{lab_name}'. Added {papers_added} new papers."
-    if errors:
-        # Log only a summary of errors if there are too many
-        error_summary = (
-            errors
-            if len(errors) <= 5
-            else errors[:5] + [f"... ({len(errors) - 5} more errors)"]
-        )
-        result += f"\nEncountered {len(errors)} errors. Error summary: {json.dumps(error_summary, indent=2)}"
-    
-    return result
 
 
 @function_tool
@@ -1478,10 +1229,243 @@ def check_new_papers_alt(lab_name: str):
     This avoids rate limiting issues when Google Scholar blocks access with CAPTCHA.
     """
     lab_name = lab_name.lower()
-    result = crawl_semantic_scholar(lab_name)
-    if isinstance(result, str):
-        if "Process completed" in result:
-            return f"Checked for new papers (via Semantic Scholar API): {result}"
-        else:
-            return f"Failed to check for new papers (via Semantic Scholar API): {result}"
-    return result
+    
+    # Not directly calling crawl_semantic_scholar, but using the same implementation
+    # Retrieve lab information
+    conn = sqlite3.connect(SQLITE_DB_PATH)
+    cursor = conn.cursor()
+
+    # Check if lab exists
+    cursor.execute("SELECT * FROM labs WHERE lab_name = ?", (lab_name,))
+    lab_info = cursor.fetchone()
+
+    if not lab_info:
+        conn.close()
+        return f"Failed to check for new papers: Lab '{lab_name}' does not exist"
+
+    # Execute crawl_semantic_scholar logic
+    try:
+        # Use external command line approach to avoid FunctionTool call issue
+        # Note: This is not a true process call, just to avoid directly calling function object
+        print(f"Checking for new papers for '{lab_name}' using Semantic Scholar API...")
+        
+        # Get lab members
+        cursor.execute(
+            "SELECT member_name, scholar_url FROM lab_members WHERE lab_name = ?",
+            (lab_name,),
+        )
+        members = cursor.fetchall()
+
+        if not members:
+            conn.close()
+            return f"Failed to check for new papers: No members found for lab '{lab_name}'"
+
+        # Create paper_tracking table if it doesn't exist
+        cursor.execute(
+            """CREATE TABLE IF NOT EXISTS paper_tracking
+                 (lab_name text, paper_id text, title text, author text, date_added text, 
+                 pdf_path text, PRIMARY KEY (lab_name, paper_id))"""
+        )
+
+        # Create lab collection if it doesn't exist
+        collection_name = f"{lab_name}_papers"
+        vector_store = Chroma(
+            collection_name=collection_name,
+            embedding_function=embeddings,
+            persist_directory=CHROMA_PERSIST_DIRECTORY,
+        )
+
+        papers_added = 0
+        errors = []
+
+        # Lab data directory
+        lab_data_dir = os.path.join(DEFAULT_DATA_DIR, lab_name)
+        Path(lab_data_dir).mkdir(parents=True, exist_ok=True)
+        
+        # Semantic Scholar API base URL
+        semantic_scholar_base_url = "https://api.semanticscholar.org/graph/v1"
+        
+        # Optional - Get API key at https://www.semanticscholar.org/product/api
+        semantic_scholar_api_key = os.getenv("SEMANTIC_SCHOLAR_API_KEY", "")
+        
+        # API request headers
+        headers = {
+            "Accept": "application/json",
+        }
+        if semantic_scholar_api_key:
+            headers["x-api-key"] = semantic_scholar_api_key
+        
+        for member_name, _ in members:
+            print(f"Searching for papers by {member_name} on Semantic Scholar...")
+            
+            try:
+                # First, find the author by name
+                author_search_url = f"{semantic_scholar_base_url}/author/search"
+                author_params = {
+                    "query": member_name,
+                    "fields": "authorId,name,affiliations,paperCount",
+                    "limit": 3  # Get top 3 matches
+                }
+                
+                author_response = requests.get(
+                    author_search_url, 
+                    headers=headers, 
+                    params=author_params,
+                    timeout=30
+                )
+                author_response.raise_for_status()
+                author_data = author_response.json()
+                
+                # Find the best match
+                author = author_data['data'][0]
+                author_id = author['authorId']
+                
+                # Wait to avoid hitting rate limits
+                time.sleep(2)
+                
+                # Get papers by this author
+                papers_url = f"{semantic_scholar_base_url}/author/{author_id}/papers"
+                papers_params = {
+                    "fields": "paperId,externalIds,title,abstract,year,authors,url,venue,publicationDate",
+                    "limit": 100
+                }
+                
+                papers_response = requests.get(
+                    papers_url, 
+                    headers=headers, 
+                    params=papers_params,
+                    timeout=30
+                )
+                papers_response.raise_for_status()
+                papers_data = papers_response.json()
+                
+                if not papers_data.get('data'):
+                    errors.append(f"No papers found for author {member_name} (ID: {author_id})")
+                    continue
+                    
+                # Process each paper
+                print(f"Found {len(papers_data['data'])} papers for {member_name}")
+                for i, paper in enumerate(papers_data['data']):
+                    # Get arXiv ID if available
+                    arxiv_id = None
+                    if paper.get('externalIds') and paper['externalIds'].get('ArXiv'):
+                        arxiv_id = paper['externalIds']['ArXiv']
+                    
+                    # Skip papers without arXiv ID
+                    if not arxiv_id:
+                        continue
+                    
+                    paper_title = paper.get('title', 'Unknown Title')
+                    print(f"Processing paper: {paper_title} (arXiv:{arxiv_id})")
+                    
+                    # Use arxiv_id as the unique identifier
+                    paper_id = arxiv_id
+                    
+                    # Check if paper already exists in the database
+                    cursor.execute(
+                        "SELECT * FROM paper_tracking WHERE lab_name = ? AND paper_id = ?",
+                        (lab_name, paper_id),
+                    )
+                    existing_paper = cursor.fetchone()
+                    
+                    if existing_paper:
+                        print(f"Paper with arXiv ID {arxiv_id} already exists in the database. Skipping.")
+                        continue
+                    
+                    # Limit request frequency
+                    if i > 0 and i % 5 == 0:
+                        print("Pausing briefly to avoid rate limits...")
+                        time.sleep(5)
+                    
+                    try:
+                        # Use arxiv API to download paper
+                        client = arxiv.Client(num_retries=5, delay_seconds=5)
+                        search = arxiv.Search(id_list=[arxiv_id])
+                        
+                        # Get arxiv paper
+                        result = next(client.results(search), None)
+                        
+                        if not result:
+                            errors.append(f"Could not find paper with arXiv ID {arxiv_id} via arXiv API")
+                            continue
+                        
+                        # Use arxiv_id as filename
+                        safe_arxiv_id = arxiv_id.replace("/", "_").replace(".", "_")
+                        filename = f"{safe_arxiv_id}.pdf"
+                        filepath = os.path.join(lab_data_dir, filename)
+                        
+                        # Download PDF
+                        result.download_pdf(dirpath=lab_data_dir, filename=filename)
+                        
+                        # Add to tracking database
+                        current_date = datetime.now().strftime("%Y-%m-%d")
+                        cursor.execute(
+                            "INSERT INTO paper_tracking (lab_name, paper_id, title, author, date_added, pdf_path) VALUES (?, ?, ?, ?, ?, ?)",
+                            (lab_name, paper_id, result.title, member_name, current_date, filepath),
+                        )
+                        
+                        # Load and add to vector database
+                        loader = PyPDFLoader(filepath)
+                        documents = loader.load()
+                        
+                        # Generate UUIDs for each document chunk
+                        uuids = [str(uuid4()) for _ in range(len(documents))]
+                        
+                        # Add metadata
+                        for doc in documents:
+                            doc.metadata["paper_id"] = paper_id  # This is arxiv_id
+                            doc.metadata["title"] = result.title
+                            doc.metadata["author"] = member_name
+                            doc.metadata["all_authors"] = ", ".join(
+                                str(a) for a in result.authors
+                            )
+                            doc.metadata["year"] = str(
+                                result.published.year
+                            )
+                            doc.metadata["lab"] = lab_name
+                            doc.metadata["source"] = "semantic_scholar_api"
+                        
+                        # Add to vector store
+                        vector_store.add_documents(documents=documents, ids=uuids)
+                        
+                        papers_added += 1
+                        print(f"Successfully added paper '{result.title}' to database.")
+                        
+                    except arxiv.arxiv.ArxivError as e:
+                        errors.append(f"arXiv API error for paper '{paper_title}' (ID: {arxiv_id}): {str(e)}")
+                        time.sleep(5)
+                    except Exception as e:
+                        import traceback
+                        tb_str = traceback.format_exc()
+                        errors.append(f"Error processing paper '{paper_title}' (ID: {arxiv_id}): {str(e)}\n{tb_str}")
+                
+                # Wait between different authors to avoid hitting rate limits
+                time.sleep(10)
+                
+            except requests.exceptions.RequestException as e:
+                errors.append(f"Network error accessing Semantic Scholar API for {member_name}: {str(e)}")
+                time.sleep(10)
+            except Exception as e:
+                import traceback
+                tb_str = traceback.format_exc()
+                errors.append(f"Unexpected error processing papers for {member_name}: {str(e)}\n{tb_str}")
+        
+        conn.commit()
+        conn.close()
+        
+        result = f"Process completed for lab '{lab_name}'. Added {papers_added} new papers."
+        if errors:
+            # If errors too many, log only summary
+            error_summary = (
+                errors
+                if len(errors) <= 5
+                else errors[:5] + [f"... ({len(errors) - 5} more errors)"]
+            )
+            result += f"\nEncountered {len(errors)} errors. Error summary: {json.dumps(error_summary, indent=2)}"
+        
+        return f"Checked for new papers (via Semantic Scholar API): {result}"
+    except Exception as e:
+        import traceback
+        tb_str = traceback.format_exc()
+        conn.close()
+        return f"Failed to check for new papers (via Semantic Scholar API): Error: {str(e)}\n{tb_str}"
