@@ -1,15 +1,15 @@
 import os
 
-from langchain.agents import AgentExecutor, create_tool_calling_agent
-from langchain.memory import ConversationBufferMemory
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_openai import ChatOpenAI
-from tools.chromadb import create_collection, add_pdf_documents, query_collection
-from tools.sqlite import insert_user_data, get_user_data
 from hyperdock_fileio import initialize_dock as fileio_dock
 from hyperpocket.tool import from_dock
-
 from hyperpocket_langchain import PocketLangchain
+from langchain.agents import AgentExecutor, create_tool_calling_agent
+from langchain.memory import ConversationBufferMemory, ConversationSummaryMemory
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_openai import ChatOpenAI
+
+from tools.chromadb import add_pdf_documents, create_collection, query_collection
+from tools.sqlite import get_user_data, insert_user_data
 
 
 def agent(pocket: PocketLangchain):
@@ -31,7 +31,15 @@ def agent(pocket: PocketLangchain):
         ]
     )
 
-    memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+    # memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+
+    memory = ConversationSummaryMemory(
+        llm=llm,
+        memory_key="chat_history",
+        return_messages=True,
+        max_summary_length=1000  # Limit summary length to control token usage
+    )
+    
     agent = create_tool_calling_agent(llm, tools, prompt)
     agent_executor = AgentExecutor(
         agent=agent,
@@ -51,7 +59,7 @@ def agent(pocket: PocketLangchain):
             break
 
         response = agent_executor.invoke({"input": user_input})
-        print("langchain agent : ", response["output"])
+        # print("langchain agent : ", response["output"]) # Abundant output
         print()
 
 
