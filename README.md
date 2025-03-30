@@ -49,6 +49,7 @@ The agent now supports robust academic paper management and recommendation featu
 - Include contextual information from related papers in the lab collection
 - Draw insights from both lab papers and recommended papers
 - Provide academic-style summaries with key findings, methodologies, and relationships to existing research
+- Intelligent content management to handle papers of any length
 
 ## Project Structure
 
@@ -97,11 +98,6 @@ pip install uv
 uv pip install -e ".[dev]"
 ```
 
-3. Install additional dependencies for paper recommendation:
-
-```bash
-uv pip install arxiv beautifulsoup4 numpy requests
-```
 
 ## Configuration
 
@@ -152,22 +148,25 @@ uv run python agent.py
 
 ```
 # Create a new research lab
-> Create a lab called NLP Research Lab at Stanford University with leader John Smith
+> Create a lab called vision_research_lab at University of California, Berkeley, with leader Jitendra Malik
 
 # Add members with their Google Scholar profiles
-> Add member Jane Doe with scholar URL https://scholar.google.com/citations?user=XXXX to NLP Research Lab
+> Add member Haozhi Qi with scholar URL https://scholar.google.com/citations?user=iyVHKkcAAAAJ&hl=en to vision_research_lab
 
 # Add research areas for the lab
-> Add natural language processing and machine learning as research areas for NLP Research Lab
+> Add computer vision, machine learning and robotics as research areas for vision_research_lab
+
+# Add website and description for the lab
+> Add https://people.eecs.berkeley.edu/~malik/ as the website for vision_research_lab, and add description for the lab: Vision Intelligence
 
 # Crawl Google Scholar for papers by lab members
-> Collect papers from NLP Research Lab members
+> Collect papers from vision_research_lab members
 
 # Get paper recommendations
-> Recommend 5 papers from the last 30 days related to NLP Research Lab
+> Recommend 5 papers from the last 30 days related to vision_research_lab
 
 # Generate a paper summary
-> Summarize the latest paper by Jane Doe from NLP Research Lab
+> Summarize the latest paper by Haozhi Qi from vision_research_lab
 ```
 
 ## Development

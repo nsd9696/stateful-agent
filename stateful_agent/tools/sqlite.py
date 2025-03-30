@@ -213,3 +213,99 @@ def get_all_labs():
     labs = cursor.fetchall()
     conn.close()
     return labs
+
+
+@function_tool
+def update_lab_website(lab_name: str, website: str):
+    """
+    Update the website URL for an existing lab.
+    """
+    lab_name = lab_name.lower()
+    conn = sqlite3.connect(os.getenv("SQLITE_DB_PATH"))
+    cursor = conn.cursor()
+
+    # Check if lab exists
+    cursor.execute("SELECT * FROM labs WHERE lab_name = ?", (lab_name,))
+    lab_info = cursor.fetchone()
+
+    if not lab_info:
+        conn.close()
+        return f"Lab '{lab_name}' does not exist"
+
+    # Update the website
+    try:
+        cursor.execute(
+            "UPDATE labs SET website = ? WHERE lab_name = ?",
+            (website, lab_name),
+        )
+        conn.commit()
+        conn.close()
+        return f"Website for lab '{lab_name}' updated successfully"
+    except sqlite3.Error as e:
+        conn.close()
+        return f"Error updating website for lab '{lab_name}': {str(e)}"
+
+
+@function_tool
+def update_lab_description(lab_name: str, description: str):
+    """
+    Update the description for an existing lab.
+    """
+    lab_name = lab_name.lower()
+    conn = sqlite3.connect(os.getenv("SQLITE_DB_PATH"))
+    cursor = conn.cursor()
+
+    # Check if lab exists
+    cursor.execute("SELECT * FROM labs WHERE lab_name = ?", (lab_name,))
+    lab_info = cursor.fetchone()
+
+    if not lab_info:
+        conn.close()
+        return f"Lab '{lab_name}' does not exist"
+
+    # Update the description
+    try:
+        cursor.execute(
+            "UPDATE labs SET description = ? WHERE lab_name = ?",
+            (description, lab_name),
+        )
+        conn.commit()
+        conn.close()
+        return f"Description for lab '{lab_name}' updated successfully"
+    except sqlite3.Error as e:
+        conn.close()
+        return f"Error updating description for lab '{lab_name}': {str(e)}"
+
+
+@function_tool
+def add_research_area(lab_name: str, research_area: str):
+    """
+    Add a new research area to an existing lab.
+    """
+    lab_name = lab_name.lower()
+    conn = sqlite3.connect(os.getenv("SQLITE_DB_PATH"))
+    cursor = conn.cursor()
+
+    # Check if lab exists
+    cursor.execute("SELECT * FROM labs WHERE lab_name = ?", (lab_name,))
+    lab_info = cursor.fetchone()
+
+    if not lab_info:
+        conn.close()
+        return f"Lab '{lab_name}' does not exist"
+
+    # Add research area
+    try:
+        cursor.execute(
+            "INSERT INTO lab_research_areas (lab_name, research_area) VALUES (?, ?)",
+            (lab_name, research_area),
+        )
+        conn.commit()
+        conn.close()
+        return f"Research area '{research_area}' added to lab '{lab_name}' successfully"
+    except sqlite3.IntegrityError:
+        conn.close()
+        return f"Research area '{research_area}' already exists for lab '{lab_name}'"
+    except sqlite3.Error as e:
+        conn.close()
+        return f"Error adding research area to lab '{lab_name}': {str(e)}"

@@ -13,7 +13,8 @@ from tools.chromadb import (add_pdf_documents, create_collection,
 from tools.paper_crawler import (check_new_papers, crawl_scholar_papers,
                                  generate_paper_summary, recommend_papers)
 from tools.sqlite import (add_lab_member, create_lab, get_all_labs,
-                          get_lab_info, get_user_data, insert_user_data)
+                          get_lab_info, get_user_data, insert_user_data,
+                          update_lab_website, update_lab_description, add_research_area)
 
 
 def agent(pocket: PocketLangchain):
@@ -107,6 +108,9 @@ if __name__ == "__main__":
             get_lab_info,
             add_lab_member,
             get_all_labs,
+            update_lab_website,
+            update_lab_description,
+            add_research_area,
             *from_dock(fileio_dock()),
             add_pdf_documents,
             query_collection,
