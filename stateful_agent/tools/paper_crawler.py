@@ -1724,7 +1724,7 @@ def check_new_papers_alt(lab_name: str):
 
 
 @function_tool
-def summarize_latest_author_paper(lab_name: str, author_name: str, related_papers_count: int = 3):
+def summarize_latest_author_paper(lab_name: str, author_name: str, related_papers_count: int = 3, show_all_papers: bool = False):
     """
     Find and summarize the latest paper by a specific author in a lab.
     
@@ -1732,6 +1732,7 @@ def summarize_latest_author_paper(lab_name: str, author_name: str, related_paper
         lab_name: The name of the lab
         author_name: The name of the author whose latest paper should be summarized
         related_papers_count: Number of related papers to include for context (default: 3)
+        show_all_papers: If True, will return a list of all papers by the author instead of a summary
         
     Returns:
         A comprehensive summary of the author's latest paper with context from related papers,
@@ -1755,19 +1756,82 @@ def summarize_latest_author_paper(lab_name: str, author_name: str, related_paper
     cursor.execute(
         """SELECT paper_id, title, date_added, pdf_path 
            FROM paper_tracking 
-           WHERE lab_name = ? AND author = ? 
-           ORDER BY date_added DESC 
-           LIMIT 1""",
+           WHERE lab_name = ? AND author = ?""",
         (lab_name, author_name),
     )
     
-    latest_paper = cursor.fetchone()
+    all_papers = cursor.fetchall()
     
-    if not latest_paper:
+    if not all_papers:
         conn.close()
         return f"No papers found for author '{author_name}' in lab '{lab_name}'"
     
+    # If user wants to see all papers, return the list
+    if show_all_papers:
+        paper_list = "Papers by {} in {} lab:\n\n".format(author_name, lab_name)
+        for i, (paper_id, title, date_added, _) in enumerate(all_papers, 1):
+            paper_list += f"{i}. {title} (arXiv:{paper_id}) - Added: {date_added}\n"
+        conn.close()
+        return paper_list
+    
+    # Find the latest paper by analyzing arXiv IDs and date_added
+    # ArXiv IDs often have the format YYMM.NNNNN for papers from 2007 onward
+    latest_paper = None
+    latest_arxiv_year_month = 0
+    latest_date_added = "0000-00-00"
+    
+    for paper in all_papers:
+        paper_id, title, date_added, pdf_path = paper
+        
+        # Parse arXiv ID to get publication date info (if possible)
+        try:
+            if "." in paper_id:
+                prefix = paper_id.split(".")[0]
+                if len(prefix) == 4 and prefix.isdigit():
+                    arxiv_year_month = int(prefix)
+                    
+                    # Compare with current latest
+                    if arxiv_year_month > latest_arxiv_year_month:
+                        latest_arxiv_year_month = arxiv_year_month
+                        latest_paper = paper
+                    elif arxiv_year_month == latest_arxiv_year_month:
+                        # If same year/month, use date_added as tiebreaker
+                        if date_added > latest_date_added:
+                            latest_date_added = date_added
+                            latest_paper = paper
+            else:
+                # Fallback to date_added for papers with old-style IDs
+                if date_added > latest_date_added:
+                    latest_date_added = date_added
+                    latest_paper = paper
+        except Exception:
+            # If we can't parse the ID, just use date_added
+            if date_added > latest_date_added:
+                latest_date_added = date_added
+                latest_paper = paper
+    
+    # If we couldn't determine by arXiv ID, fallback to most recently added
+    if not latest_paper:
+        for paper in all_papers:
+            _, _, date_added, _ = paper
+            if date_added > latest_date_added:
+                latest_date_added = date_added
+                latest_paper = paper
+    
+    # If still no latest paper found (unlikely), just use the first one
+    if not latest_paper and all_papers:
+        latest_paper = all_papers[0]
+    
     arxiv_id, title, date_added, pdf_path = latest_paper
+    
+    # Verify that the date_added is not in the future (which would indicate bad data)
+    try:
+        paper_date = datetime.strptime(date_added, "%Y-%m-%d").date()
+        today = datetime.now().date()
+        if paper_date > today:
+            print(f"WARNING: Paper has a future date in the database: {date_added}. This may indicate incorrect data.")
+    except:
+        print(f"WARNING: Could not verify date format for: {date_added}")
     
     # Display which paper we're summarizing
     print(f"Summarizing latest paper by {author_name}: '{title}' (arXiv:{arxiv_id}) from {date_added}")
@@ -1817,7 +1881,7 @@ def summarize_latest_author_paper(lab_name: str, author_name: str, related_paper
                 conn.close()
                 return f"Error: Failed to download PDF for arXiv:{arxiv_id}. Please try again later. Details: {str(e)}"
     
-    # Implementation from generate_paper_summary:
+    # Rest of the implementation remains the same
     try:
         if not os.path.exists(pdf_path):
             conn.close()
