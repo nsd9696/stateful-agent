@@ -309,3 +309,47 @@ def add_research_area(lab_name: str, research_area: str):
     except sqlite3.Error as e:
         conn.close()
         return f"Error adding research area to lab '{lab_name}': {str(e)}"
+
+
+@function_tool
+def delete_lab(lab_name: str):
+    """
+    Delete a lab and all associated data (members, research areas, papers).
+    """
+    lab_name = lab_name.lower()
+    conn = sqlite3.connect(os.getenv("SQLITE_DB_PATH"))
+    cursor = conn.cursor()
+
+    # Check if lab exists
+    cursor.execute("SELECT * FROM labs WHERE lab_name = ?", (lab_name,))
+    lab_info = cursor.fetchone()
+
+    if not lab_info:
+        conn.close()
+        return f"Lab '{lab_name}' does not exist"
+
+    try:
+        # Delete lab members
+        cursor.execute("DELETE FROM lab_members WHERE lab_name = ?", (lab_name,))
+        
+        # Delete research areas
+        cursor.execute("DELETE FROM lab_research_areas WHERE lab_name = ?", (lab_name,))
+        
+        # Delete papers (if paper_tracking table exists)
+        try:
+            cursor.execute("DELETE FROM paper_tracking WHERE lab_name = ?", (lab_name,))
+        except sqlite3.OperationalError:
+            # Table might not exist yet
+            pass
+            
+        # Delete the lab itself
+        cursor.execute("DELETE FROM labs WHERE lab_name = ?", (lab_name,))
+        
+        # Commit changes
+        conn.commit()
+        conn.close()
+        
+        return f"Lab '{lab_name}' and all associated data deleted successfully"
+    except sqlite3.Error as e:
+        conn.close()
+        return f"Error deleting lab '{lab_name}': {str(e)}"
