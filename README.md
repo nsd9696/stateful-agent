@@ -169,6 +169,11 @@ uv run python agent.py
 
 # Generate a paper summary
 > Summarize the latest paper by Haozhi Qi from vision_research_lab
+
+> Summarize the latest paper from vision_research_lab
+
+# Delete the lab
+> Delete the lab vision_research_lab
 ```
 
 ## Development
