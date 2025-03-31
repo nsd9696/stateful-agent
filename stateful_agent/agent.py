@@ -17,6 +17,7 @@ from tools.paper_crawler import (check_new_papers, crawl_scholar_papers,
 from tools.sqlite import (add_lab_member, create_lab, get_all_labs,
                           get_lab_info, get_user_data, insert_user_data,
                           update_lab_website, update_lab_description, add_research_area)
+from tools.linkedin_publisher import publish_linkedin_post
 
 
 def agent(pocket: PocketLangchain):
@@ -123,6 +124,7 @@ if __name__ == "__main__":
             recommend_papers,
             generate_paper_summary,
             summarize_latest_author_paper,
+            publish_linkedin_post,
         ],
     ) as pocket:
         agent(pocket)
