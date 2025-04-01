@@ -25,6 +25,7 @@ dependencies = [
     "numpy>=1.26.0",
     "requests>=2.30.0",
     "tzlocal>=5.0.0",
+    "sentence-transformers>=2.2.2",
 ]
 
 [project.optional-dependencies]

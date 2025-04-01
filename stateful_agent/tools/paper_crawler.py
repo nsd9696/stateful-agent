@@ -20,6 +20,8 @@ from hyperpocket.tool import function_tool
 from langchain_chroma import Chroma
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_openai import OpenAIEmbeddings
+from sentence_transformers import SentenceTransformer
+from tools.sqlite import migrate_paper_tracking_schema
 
 # Load environment variables
 dotenv_path = os.path.join(os.path.dirname(__file__), "..", ".env")
@@ -38,6 +40,12 @@ Path(DEFAULT_DATA_DIR).mkdir(parents=True, exist_ok=True)
 Path(os.path.join(DEFAULT_DATA_DIR, "recommendation")).mkdir(
     parents=True, exist_ok=True
 )
+
+# Initialize database schema
+try:
+    migrate_paper_tracking_schema()
+except Exception as e:
+    print(f"Error migrating schema: {str(e)}")
 
 
 @function_tool
@@ -75,7 +83,7 @@ def crawl_scholar_papers(lab_name: str):
     cursor.execute(
         """CREATE TABLE IF NOT EXISTS paper_tracking
              (lab_name text, paper_id text, title text, author text, date_added text, 
-             pdf_path text, PRIMARY KEY (lab_name, paper_id))"""
+             pdf_path text, abstract text, PRIMARY KEY (lab_name, paper_id))"""
     )
 
     # Create a collection for the lab if it doesn't exist
@@ -212,8 +220,9 @@ def crawl_scholar_papers(lab_name: str):
 
                         # Add to tracking database using arxiv_id
                         current_date = datetime.now().strftime("%Y-%m-%d")
+                        abstract = extract_abstract_from_arxiv(result)
                         cursor.execute(
-                            "INSERT INTO paper_tracking (lab_name, paper_id, title, author, date_added, pdf_path) VALUES (?, ?, ?, ?, ?, ?)",
+                            "INSERT INTO paper_tracking (lab_name, paper_id, title, author, date_added, pdf_path, abstract) VALUES (?, ?, ?, ?, ?, ?, ?)",
                             (
                                 lab_name,
                                 paper_id,
@@ -221,7 +230,8 @@ def crawl_scholar_papers(lab_name: str):
                                 member_name,
                                 current_date,
                                 filepath,
-                            ),  # Use title from arxiv result
+                                abstract,
+                            ),  # Use title and abstract from arxiv result
                         )
 
                         # Load and add to vector database
@@ -344,7 +354,7 @@ def check_new_papers(lab_name: str):
     cursor.execute(
         """CREATE TABLE IF NOT EXISTS paper_tracking
              (lab_name text, paper_id text, title text, author text, date_added text, 
-             pdf_path text, PRIMARY KEY (lab_name, paper_id))"""
+             pdf_path text, abstract text, PRIMARY KEY (lab_name, paper_id))"""
     )
 
     # Create a collection for the lab if it doesn't exist
@@ -481,8 +491,9 @@ def check_new_papers(lab_name: str):
 
                         # Add to tracking database using arxiv_id
                         current_date = datetime.now().strftime("%Y-%m-%d")
+                        abstract = extract_abstract_from_arxiv(result)
                         cursor.execute(
-                            "INSERT INTO paper_tracking (lab_name, paper_id, title, author, date_added, pdf_path) VALUES (?, ?, ?, ?, ?, ?)",
+                            "INSERT INTO paper_tracking (lab_name, paper_id, title, author, date_added, pdf_path, abstract) VALUES (?, ?, ?, ?, ?, ?, ?)",
                             (
                                 lab_name,
                                 paper_id,
@@ -490,7 +501,8 @@ def check_new_papers(lab_name: str):
                                 member_name,
                                 current_date,
                                 filepath,
-                            ),  # Use title from arxiv result
+                                abstract,
+                            ),  # Use title and abstract from arxiv result
                         )
 
                         # Load and add to vector database
@@ -580,7 +592,8 @@ def check_new_papers(lab_name: str):
 @function_tool
 def recommend_papers(lab_name: str, time_period_days: int, num_papers: int):
     """
-    Recommend papers from arXiv related to the lab's research based on collection similarity.
+    Recommend papers from arXiv related to the lab's research based on semantic similarity and time decay.
+    Papers are scored using a combination of content relevance and recency, providing more accurate recommendations.
     Papers are stored in data/recommendation directory and added to a recommendation collection using arXiv ID as the unique identifier.
     Avoids recommending papers already tracked in the main lab collection.
 
@@ -609,6 +622,23 @@ def recommend_papers(lab_name: str, time_period_days: int, num_papers: int):
     if not research_areas:
         conn.close()
         return f"No research areas defined for lab '{lab_name}'"
+        
+    # Get lab papers from database for corpus
+    cursor.execute(
+        "SELECT paper_id, title, abstract, date_added FROM paper_tracking WHERE lab_name = ?",
+        (lab_name,),
+    )
+    
+    lab_papers = [{
+        'paper_id': row[0],
+        'title': row[1],
+        'abstract': row[2] if row[2] else "",  # Use abstract if available
+        'date': row[3]
+    } for row in cursor.fetchall()]
+    
+    if not lab_papers:
+        lab_papers = []  # Continue with empty corpus, but don't fail
+        print(f"Warning: No existing papers found for lab '{lab_name}' to use as corpus.")
 
     # Format research areas for arXiv query
     arxiv_categories = [area[0].lower() for area in research_areas]
@@ -829,6 +859,31 @@ def recommend_papers(lab_name: str, time_period_days: int, num_papers: int):
         conn.close()
         return f"No new papers found matching the research areas of lab '{lab_name}' in the last {time_period_days} days."
     
+    # Use semantic similarity ranking if we have existing lab papers to compare against
+    if len(scored_papers) > 0 and len(lab_papers) > 0:
+        # Convert scored_papers to the format expected by rerank_papers
+        candidates = []
+        for paper, basic_score in scored_papers:
+            arxiv_id = paper.get_short_id()
+            candidates.append({
+                'paper_id': arxiv_id,
+                'title': paper.title,
+                'abstract': paper.summary,
+                'authors': ", ".join(str(a) for a in paper.authors),
+                'url': f"https://arxiv.org/abs/{arxiv_id}",
+                'paper_obj': paper  # Keep the original paper object for later use
+            })
+            
+        # Use semantic similarity ranking
+        ranked_candidates = rerank_papers(candidates, lab_papers)
+        
+        # Convert back to the format expected by the rest of the function
+        recommended_papers = [(paper['paper_obj'], paper['score']) for paper in ranked_candidates[:num_papers]]
+    else:
+        # If no lab papers for comparison or no candidates, keep the basic scoring
+        # Take top N papers as requested
+        recommended_papers = scored_papers[:num_papers]
+    
     # Download and add the recommended papers to the recommendation collection
     papers_added = []
     
@@ -849,9 +904,10 @@ def recommend_papers(lab_name: str, time_period_days: int, num_papers: int):
             current_date = datetime.now().strftime("%Y-%m-%d")
             
             # Insert with 'recommendation' as author to distinguish from lab member papers
+            abstract = extract_abstract_from_arxiv(paper)
             cursor.execute(
-                "INSERT OR IGNORE INTO paper_tracking (lab_name, paper_id, title, author, date_added, pdf_path) VALUES (?, ?, ?, ?, ?, ?)",
-                (lab_name, arxiv_id, paper.title, "recommendation", current_date, filepath),
+                "INSERT OR IGNORE INTO paper_tracking (lab_name, paper_id, title, author, date_added, pdf_path, abstract) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (lab_name, arxiv_id, paper.title, "recommendation", current_date, filepath, abstract),
             )
             
             # Add to vector database if recommendation store exists
@@ -947,7 +1003,7 @@ def crawl_semantic_scholar(lab_name: str):
     cursor.execute(
         """CREATE TABLE IF NOT EXISTS paper_tracking
              (lab_name text, paper_id text, title text, author text, date_added text, 
-             pdf_path text, PRIMARY KEY (lab_name, paper_id))"""
+             pdf_path text, abstract text, PRIMARY KEY (lab_name, paper_id))"""
     )
 
     # Create a collection for the lab if it doesn't exist
@@ -1089,9 +1145,10 @@ def crawl_semantic_scholar(lab_name: str):
                     
                     # Add to tracking database
                     current_date = datetime.now().strftime("%Y-%m-%d")
+                    abstract = extract_abstract_from_arxiv(result)
                     cursor.execute(
-                        "INSERT INTO paper_tracking (lab_name, paper_id, title, author, date_added, pdf_path) VALUES (?, ?, ?, ?, ?, ?)",
-                        (lab_name, paper_id, result.title, member_name, current_date, filepath),
+                        "INSERT INTO paper_tracking (lab_name, paper_id, title, author, date_added, pdf_path, abstract) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (lab_name, paper_id, result.title, member_name, current_date, filepath, abstract),
                     )
                     
                     # Load and add to vector database
@@ -1516,7 +1573,7 @@ def check_new_papers_alt(lab_name: str):
         cursor.execute(
             """CREATE TABLE IF NOT EXISTS paper_tracking
                  (lab_name text, paper_id text, title text, author text, date_added text, 
-                 pdf_path text, PRIMARY KEY (lab_name, paper_id))"""
+                 pdf_path text, abstract text, PRIMARY KEY (lab_name, paper_id))"""
         )
 
         # Create lab collection if it doesn't exist
@@ -1651,9 +1708,10 @@ def check_new_papers_alt(lab_name: str):
                         
                         # Add to tracking database
                         current_date = datetime.now().strftime("%Y-%m-%d")
+                        abstract = extract_abstract_from_arxiv(result)
                         cursor.execute(
-                            "INSERT INTO paper_tracking (lab_name, paper_id, title, author, date_added, pdf_path) VALUES (?, ?, ?, ?, ?, ?)",
-                            (lab_name, paper_id, result.title, member_name, current_date, filepath),
+                            "INSERT INTO paper_tracking (lab_name, paper_id, title, author, date_added, pdf_path, abstract) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            (lab_name, paper_id, result.title, member_name, current_date, filepath, abstract),
                         )
                         
                         # Load and add to vector database
@@ -1690,7 +1748,7 @@ def check_new_papers_alt(lab_name: str):
                         import traceback
                         tb_str = traceback.format_exc()
                         errors.append(f"Error processing paper '{paper_title}' (ID: {arxiv_id}): {str(e)}\n{tb_str}")
-                
+                    
                 # Wait between different authors to avoid hitting rate limits
                 time.sleep(10)
                 
@@ -2614,3 +2672,73 @@ Place the paper in the context of the provided related research snippets.
         import traceback
         tb_str = traceback.format_exc()
         return f"Error generating paper summary for arXiv:{arxiv_id}: {str(e)}\n{tb_str}"
+
+
+def rerank_papers(candidate_papers: list[dict], corpus_papers: list[dict], model: str = 'avsolatorio/GIST-small-Embedding-v0') -> list[dict]:
+    """
+    Rerank papers using semantic similarity and time decay.
+    
+    Args:
+        candidate_papers: List of papers to score
+        corpus_papers: List of papers to compare against
+        model: Name of the sentence transformer model to use
+        
+    Returns:
+        List of papers sorted by score
+    """
+    encoder = SentenceTransformer(model)
+    
+    # Sort corpus by date, from newest to oldest
+    corpus_papers = sorted(corpus_papers, 
+                         key=lambda x: datetime.strptime(x.get('date', '1970-01-01'), '%Y-%m-%d'),
+                         reverse=True)
+    
+    # Calculate time decay weights
+    time_decay_weight = 1 / (1 + np.log10(np.arange(len(corpus_papers)) + 1))
+    time_decay_weight = time_decay_weight / time_decay_weight.sum()
+    
+    # Get paper text for encoding - use titles if abstracts are empty
+    corpus_texts = []
+    for paper in corpus_papers:
+        abstract = paper.get('abstract', '')
+        if abstract and len(abstract.strip()) > 10:  # Use abstract if available and non-empty
+            corpus_texts.append(abstract)
+        else:  # Fallback to title
+            corpus_texts.append(paper.get('title', ''))
+    
+    candidate_texts = []
+    for paper in candidate_papers:
+        abstract = paper.get('abstract', '')
+        if abstract and len(abstract.strip()) > 10:  # Use abstract if available and non-empty
+            candidate_texts.append(abstract)
+        else:  # Fallback to title
+            candidate_texts.append(paper.get('title', ''))
+    
+    # Encode texts (abstracts or titles)
+    corpus_features = encoder.encode(corpus_texts)
+    candidate_features = encoder.encode(candidate_texts)
+    
+    # Calculate similarity scores
+    similarity = encoder.similarity(candidate_features, corpus_features)
+    scores = (similarity * time_decay_weight).sum(axis=1) * 10
+    
+    # Add scores to papers and sort
+    for score, paper in zip(scores, candidate_papers):
+        paper['score'] = float(score)
+    
+    return sorted(candidate_papers, key=lambda x: x['score'], reverse=True)
+
+
+def extract_abstract_from_arxiv(paper):
+    """
+    Extract the abstract from an arxiv paper object.
+    
+    Args:
+        paper: The arxiv paper object
+        
+    Returns:
+        The abstract text or empty string if not available
+    """
+    if hasattr(paper, 'summary') and paper.summary:
+        return paper.summary.strip()
+    return ""

@@ -353,3 +353,35 @@ def delete_lab(lab_name: str):
     except sqlite3.Error as e:
         conn.close()
         return f"Error deleting lab '{lab_name}': {str(e)}"
+
+
+def get_db_connection():
+    """
+    Get a connection to the SQLite database.
+    Helper function to standardize connection handling across functions.
+    """
+    return sqlite3.connect(os.getenv("SQLITE_DB_PATH"))
+
+def migrate_paper_tracking_schema():
+    """
+    Migrate the paper_tracking table to include an abstract column if it doesn't exist.
+    This function should be called at the start of the application to ensure the schema is up to date.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Check if abstract column exists
+    cursor.execute("PRAGMA table_info(paper_tracking)")
+    columns = cursor.fetchall()
+    column_names = [column[1] for column in columns]
+    
+    # Add abstract column if it doesn't exist
+    if "abstract" not in column_names:
+        try:
+            cursor.execute("ALTER TABLE paper_tracking ADD COLUMN abstract TEXT")
+            conn.commit()
+            print("Added abstract column to paper_tracking table")
+        except sqlite3.Error as e:
+            print(f"Error adding abstract column: {str(e)}")
+    
+    conn.close()
