@@ -2686,6 +2686,7 @@ def rerank_papers(candidate_papers: list[dict], corpus_papers: list[dict], model
     Returns:
         List of papers sorted by score
     """
+    print("loading SentenceTransformer embedding model")
     encoder = SentenceTransformer(model)
     
     # Sort corpus by date, from newest to oldest
