@@ -1,7 +1,7 @@
 import os
 
 from langchain.agents import AgentExecutor, create_tool_calling_agent
-from langchain.memory import ConversationBufferMemory
+from langchain.memory import ConversationSummaryMemory
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_openai import ChatOpenAI
 from tools.chromadb import create_collection, add_pdf_documents, query_collection
@@ -11,6 +11,7 @@ from hyperpocket.tool import from_dock
 
 from hyperpocket_langchain import PocketLangchain
 
+# Use ConversationSummaryMemory, which maintains a summary of the conversation instead of the full history
 
 def agent(pocket: PocketLangchain):
     tools = pocket.get_tools()
@@ -31,7 +32,14 @@ def agent(pocket: PocketLangchain):
         ]
     )
 
-    memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+    # Using ConversationSummaryMemory instead of ConversationBufferMemory
+    memory = ConversationSummaryMemory(
+        llm=llm,
+        memory_key="chat_history",
+        return_messages=True,
+        max_summary_length=1000  # Limit summary length to control token usage
+    )
+    
     agent = create_tool_calling_agent(llm, tools, prompt)
     agent_executor = AgentExecutor(
         agent=agent,
