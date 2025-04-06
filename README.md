@@ -50,15 +50,68 @@ The agent now supports robust academic paper management and recommendation featu
 - Draw insights from both lab papers and recommended papers
 - Provide academic-style summaries with key findings, methodologies, and relationships to existing research
 
+## LinkedIn Integration
+
+### Setting Up LinkedIn API Access
+
+1. Create a LinkedIn Developer Application:
+   - Go to [LinkedIn Developer Portal](https://developer.linkedin.com/)
+   - Create a new app providing:
+     - App Name
+     - Application logo
+     - LinkedIn company page (required, cannot be a profile page)
+   - Accept terms and conditions
+
+2. Configure Application Permissions:
+   - Under Products, request access for:
+     - "Share on LinkedIn" (adds w_member_social scope)
+     - "Sign In with LinkedIn using OpenID Connect" (adds openid and email scopes)
+
+3. Generate Access Token:
+   For personal use (recommended):
+   - Go to [LinkedIn OAuth2 tools](https://www.linkedin.com/developers/tools/oauth)
+   - Generate a token with scopes: `w_member_social openid email profile'
+   - Note: Access tokens are valid for 60 days
+
+4. Get User ID:
+   ```bash
+   curl --location 'https://api.linkedin.com/v2/userinfo' \
+   --header 'Authorization: Bearer YOUR_ACCESS_TOKEN'
+   ```
+   Save the returned user ID.
+
+### Environment Configuration
+
+Add the following to your `.env` file:
+
+```env
+LINKEDIN_USER_ID=your_user_id
+LINKEDIN_ACCESS_TOKEN=your_access_token
+```
+
+#### Features:
+- Supports text posts with formatting and emojis
+- Configurable visibility (PUBLIC or CONNECTIONS)
+- Automatic error handling and validation
+- Environment-based configuration
+
+#### Agent Integration:
+The LinkedIn publisher is available as an agent tool and can be used with the following parameters:
+- `commentary`: The content of the post
+- `visibility`: Post visibility setting ("PUBLIC" or "CONNECTIONS")
+
+### Important Notes:
+- LinkedIn access tokens expire after 60 days
+
 ## Project Structure
 
-```
-stateful-agent/
+```stateful-agent/
 ├── stateful_agent/           # Main package directory
 │   ├── tools/               # Tool implementations
 │   │   ├── sqlite.py        # Entity database operations
 │   │   ├── chromadb.py      # Vector database operations
-│   │   └── paper_crawler.py # Paper collection and recommendation tools
+│   │   ├── paper_crawler.py # Paper collection and recommendation tools
+│   │   └── linkedin_publisher.py # LinkedIn posting automation
 │   ├── agent.py             # Core agent implementation
 │   ├── data/                # Data storage directory
 │   │   ├── <lab_name>/      # Lab-specific paper PDFs
@@ -73,7 +126,6 @@ stateful-agent/
 - Python 3.11 or higher
 - OpenAI API key (gpt-4o model for paper summarization and embeddings)
 - Internet connection for accessing Google Scholar and arXiv
-- (Optional) GitHub, Slack, or Google credentials for additional features
 
 ## Installation
 
@@ -113,21 +165,6 @@ SQLITE_DB_PATH=./sqlite_langchain_db.db
 DEFAULT_DATA_DIR=./data
 ```
 
-### .secrets.toml (Optional)
-
-```toml
-[git.github]
-github_token = "YOUR_GITHUB_TOKEN"
-
-[auth.slack]
-client_id = "SLACK_APP_CLIENT_ID"
-client_secret = "SLACK_APP_CLIENT_SECRET"
-
-[auth.google]
-client_id = "GOOGLE_CLIENT_ID"
-client_secret = "GOOGLE_CLIENT_SECRET"
-```
-
 ## Usage
 
 1. Prepare the environment:
@@ -140,7 +177,7 @@ mkdir -p data/recommendation
 2. Run the agent:
 
 ```bash
-uv run python agent.py
+python agent.py
 ```
 
 3. Example interactions:
@@ -169,6 +206,9 @@ uv run python agent.py
 
 # Generate a paper summary
 > Summarize the latest paper by Haozhi Qi from vision_research_lab
+
+# Share paper summary on LinkedIn
+> Share the paper summary on LinkedIn publicly with appropriate hashtags
 ```
 
 ## Development
