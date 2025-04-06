@@ -49,6 +49,9 @@ def agent(pocket: PocketLangchain):
         handle_parsing_errors=True,
     )
 
+    return agent_executor
+
+def cli_mode(agent_executor):
     print("\n\n\n")
     print("Hello, this is langchain agent.")
     while True:
@@ -62,7 +65,6 @@ def agent(pocket: PocketLangchain):
         print("langchain agent : ", response["output"])
         print()
 
-
 if __name__ == "__main__":
     with PocketLangchain(
         tools=[
@@ -74,4 +76,5 @@ if __name__ == "__main__":
             query_collection,
         ],
     ) as pocket:
-        agent(pocket)
+        agent_executor = agent(pocket)
+        cli_mode(agent_executor)
