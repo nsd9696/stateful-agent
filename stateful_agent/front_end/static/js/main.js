@@ -159,4 +159,3 @@ userInput.addEventListener('keypress', (e) => {
 
 // Initial load
 loadFiles(); 
-loadFiles(); 
