@@ -17,13 +17,16 @@ from tools.paper_crawler import (check_new_papers, crawl_scholar_papers,
 from tools.sqlite import (add_lab_member, create_lab, get_all_labs,
                           get_lab_info, get_user_data, insert_user_data,
                           update_lab_website, update_lab_description, add_research_area)
-from tools.linkedin_publisher import publish_linkedin_post
+from tools.linkedin_publisher import publish_linkedin_post, publish_paper_to_linkedin, search_and_publish_paper
+from tools.paper_scraper import scrape_papers, save_papers_to_db, create_linkedin_post_from_paper
 
 
 def agent(pocket: PocketLangchain):
     tools = pocket.get_tools()
 
-    llm = ChatOpenAI(model="gpt-4o", api_key=os.getenv("OPENAI_API_KEY"))
+    # Use the appropriate API key for the agent
+    agent_api_key = os.getenv("OPENAI_API_KEY_AGENT")
+    llm = ChatOpenAI(model="gpt-4o", api_key=agent_api_key)
 
     prompt = ChatPromptTemplate.from_messages(
         [
@@ -39,6 +42,7 @@ def agent(pocket: PocketLangchain):
                 - Check for new papers by lab members
                 - Recommend relevant papers from arXiv based on lab research interests
                 - Generate comprehensive paper summaries that include context from related research
+                - Publish paper summaries to LinkedIn with PDF attachments
                 
                 When referring to labs, always use lowercase for the lab_name parameter.
                 User names should not contain special characters or spaces.
@@ -124,7 +128,12 @@ if __name__ == "__main__":
             recommend_papers,
             generate_paper_summary,
             summarize_latest_author_paper,
+            scrape_papers,
+            save_papers_to_db,
             publish_linkedin_post,
+            publish_paper_to_linkedin,
+            search_and_publish_paper,
+            create_linkedin_post_from_paper,
         ],
     ) as pocket:
         agent(pocket)

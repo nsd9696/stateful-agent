@@ -25,8 +25,12 @@ from langchain_openai import OpenAIEmbeddings
 dotenv_path = os.path.join(os.path.dirname(__file__), "..", ".env")
 load_dotenv(dotenv_path)
 
-# Initialize embeddings model
-embeddings = OpenAIEmbeddings(model=os.getenv("OPENAI_EMBEDDING_MODEL"))
+# Use the appropriate API key for embeddings
+embeddings_api_key = os.getenv("OPENAI_API_KEY_AGENT")
+embeddings = OpenAIEmbeddings(
+    model=os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"),
+    api_key=embeddings_api_key
+)
 
 # Constants
 DEFAULT_DATA_DIR = os.getenv("DEFAULT_DATA_DIR")
@@ -1428,10 +1432,10 @@ Related Papers Context (Top {related_papers_count}):
         from langchain_openai import ChatOpenAI
 
         # Ensure API key is loaded correctly
-        api_key = os.getenv("OPENAI_API_KEY")
+        api_key = os.getenv("OPENAI_API_KEY_AGENT")
         if not api_key:
             conn.close()
-            return "Error: OPENAI_API_KEY environment variable not set."
+            return "Error: OpenAI API key not set. Please set OPENAI_API_KEY_AGENT environment variable."
 
         llm = ChatOpenAI(
             model="gpt-4o", api_key=api_key, temperature=0.3
@@ -2124,10 +2128,10 @@ Related Papers Context (Top {related_papers_count}):
         from langchain_openai import ChatOpenAI
 
         # Ensure API key is loaded correctly
-        api_key = os.getenv("OPENAI_API_KEY")
+        api_key = os.getenv("OPENAI_API_KEY_AGENT")
         if not api_key:
             conn.close()
-            return "Error: OPENAI_API_KEY environment variable not set."
+            return "Error: OpenAI API key not set. Please set OPENAI_API_KEY_AGENT environment variable."
 
         llm = ChatOpenAI(
             model="gpt-4o", api_key=api_key, temperature=0.3
