@@ -9,10 +9,8 @@ from tools.sqlite import insert_user_data, get_user_data
 from hyperdock_fileio import initialize_dock as fileio_dock
 from hyperpocket.tool import from_dock
 
-# 获取当前文件所在目录的绝对路径
 current_dir = os.path.dirname(os.path.abspath(__file__))
 
-# 设置模板和静态文件目录的绝对路径
 template_dir = os.path.join(current_dir, 'front_end', 'templates')
 static_dir = os.path.join(current_dir, 'front_end', 'static')
 
