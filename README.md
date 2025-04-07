@@ -60,6 +60,7 @@ stateful-agent/
 │   │   ├── chromadb.py      # Vector database operations
 │   │   └── paper_crawler.py # Paper collection and recommendation tools
 │   ├── agent.py             # Core agent implementation
+│   ├── paper_recommendation_agent.py # Specialized paper recommendation agent
 │   ├── data/                # Data storage directory
 │   │   ├── <lab_name>/      # Lab-specific paper PDFs
 │   │   └── recommendation/  # Recommended paper PDFs
@@ -140,7 +141,7 @@ mkdir -p data/recommendation
 2. Run the agent:
 
 ```bash
-uv run python agent.py
+uv run python paper_recommendation_agent.py
 ```
 
 3. Example interactions:
