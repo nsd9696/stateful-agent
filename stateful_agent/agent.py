@@ -84,8 +84,8 @@ class SimpleStatefulAgent(StatefulAgentExecutor):
             print("langchain agent : ", response["output"])
             print()
 
-if __name__ == "__main__":
-    agent_executor = SimpleStatefulAgent.create_agent()
-    agent_executor.terminal_mode()  # Uses class executor
+# if __name__ == "__main__":
+#     agent_executor = SimpleStatefulAgent.create_agent()
+#     agent_executor.terminal_mode()  # Uses class executor
     # Or alternatively:
     # SimpleStatefulAgent.terminal_mode(agent_executor.executor)  # Uses provided executor
