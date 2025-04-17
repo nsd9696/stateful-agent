@@ -6,7 +6,7 @@
     <title>Stateful Agent Interface</title>
     <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', path='css/style.css') }}">
 </head>
 <body class="bg-gray-50">
     <div class="min-h-screen">
@@ -76,6 +76,6 @@
         </div>
     </div>
 
-    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+    <script src="{{ url_for('static', path='js/main.js') }}"></script>
 </body>
 </html> 
