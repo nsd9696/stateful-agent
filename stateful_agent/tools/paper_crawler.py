@@ -20,15 +20,17 @@ from hyperpocket.tool import function_tool
 from langchain_chroma import Chroma
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_openai import OpenAIEmbeddings
-from sentence_transformers import SentenceTransformer
-from tools.sqlite import migrate_paper_tracking_schema
 
 # Load environment variables
 dotenv_path = os.path.join(os.path.dirname(__file__), "..", ".env")
 load_dotenv(dotenv_path)
 
-# Initialize embeddings model
-embeddings = OpenAIEmbeddings(model=os.getenv("OPENAI_EMBEDDING_MODEL"))
+# Use the appropriate API key for embeddings
+embeddings_api_key = os.getenv("OPENAI_API_KEY_AGENT")
+embeddings = OpenAIEmbeddings(
+    model=os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"),
+    api_key=embeddings_api_key
+)
 
 # Constants
 DEFAULT_DATA_DIR = os.getenv("DEFAULT_DATA_DIR")
@@ -40,12 +42,6 @@ Path(DEFAULT_DATA_DIR).mkdir(parents=True, exist_ok=True)
 Path(os.path.join(DEFAULT_DATA_DIR, "recommendation")).mkdir(
     parents=True, exist_ok=True
 )
-
-# Initialize database schema
-try:
-    migrate_paper_tracking_schema()
-except Exception as e:
-    print(f"Error migrating schema: {str(e)}")
 
 
 @function_tool
@@ -83,7 +79,7 @@ def crawl_scholar_papers(lab_name: str):
     cursor.execute(
         """CREATE TABLE IF NOT EXISTS paper_tracking
              (lab_name text, paper_id text, title text, author text, date_added text, 
-             pdf_path text, abstract text, PRIMARY KEY (lab_name, paper_id))"""
+             pdf_path text, PRIMARY KEY (lab_name, paper_id))"""
     )
 
     # Create a collection for the lab if it doesn't exist
@@ -220,9 +216,8 @@ def crawl_scholar_papers(lab_name: str):
 
                         # Add to tracking database using arxiv_id
                         current_date = datetime.now().strftime("%Y-%m-%d")
-                        abstract = extract_abstract_from_arxiv(result)
                         cursor.execute(
-                            "INSERT INTO paper_tracking (lab_name, paper_id, title, author, date_added, pdf_path, abstract) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            "INSERT INTO paper_tracking (lab_name, paper_id, title, author, date_added, pdf_path) VALUES (?, ?, ?, ?, ?, ?)",
                             (
                                 lab_name,
                                 paper_id,
@@ -230,8 +225,7 @@ def crawl_scholar_papers(lab_name: str):
                                 member_name,
                                 current_date,
                                 filepath,
-                                abstract,
-                            ),  # Use title and abstract from arxiv result
+                            ),  # Use title from arxiv result
                         )
 
                         # Load and add to vector database
@@ -354,7 +348,7 @@ def check_new_papers(lab_name: str):
     cursor.execute(
         """CREATE TABLE IF NOT EXISTS paper_tracking
              (lab_name text, paper_id text, title text, author text, date_added text, 
-             pdf_path text, abstract text, PRIMARY KEY (lab_name, paper_id))"""
+             pdf_path text, PRIMARY KEY (lab_name, paper_id))"""
     )
 
     # Create a collection for the lab if it doesn't exist
@@ -491,9 +485,8 @@ def check_new_papers(lab_name: str):
 
                         # Add to tracking database using arxiv_id
                         current_date = datetime.now().strftime("%Y-%m-%d")
-                        abstract = extract_abstract_from_arxiv(result)
                         cursor.execute(
-                            "INSERT INTO paper_tracking (lab_name, paper_id, title, author, date_added, pdf_path, abstract) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            "INSERT INTO paper_tracking (lab_name, paper_id, title, author, date_added, pdf_path) VALUES (?, ?, ?, ?, ?, ?)",
                             (
                                 lab_name,
                                 paper_id,
@@ -501,8 +494,7 @@ def check_new_papers(lab_name: str):
                                 member_name,
                                 current_date,
                                 filepath,
-                                abstract,
-                            ),  # Use title and abstract from arxiv result
+                            ),  # Use title from arxiv result
                         )
 
                         # Load and add to vector database
@@ -592,8 +584,7 @@ def check_new_papers(lab_name: str):
 @function_tool
 def recommend_papers(lab_name: str, time_period_days: int, num_papers: int):
     """
-    Recommend papers from arXiv related to the lab's research based on semantic similarity and time decay.
-    Papers are scored using a combination of content relevance and recency, providing more accurate recommendations.
+    Recommend papers from arXiv related to the lab's research based on collection similarity.
     Papers are stored in data/recommendation directory and added to a recommendation collection using arXiv ID as the unique identifier.
     Avoids recommending papers already tracked in the main lab collection.
 
@@ -622,23 +613,6 @@ def recommend_papers(lab_name: str, time_period_days: int, num_papers: int):
     if not research_areas:
         conn.close()
         return f"No research areas defined for lab '{lab_name}'"
-        
-    # Get lab papers from database for corpus
-    cursor.execute(
-        "SELECT paper_id, title, abstract, date_added FROM paper_tracking WHERE lab_name = ?",
-        (lab_name,),
-    )
-    
-    lab_papers = [{
-        'paper_id': row[0],
-        'title': row[1],
-        'abstract': row[2] if row[2] else "",  # Use abstract if available
-        'date': row[3]
-    } for row in cursor.fetchall()]
-    
-    if not lab_papers:
-        lab_papers = []  # Continue with empty corpus, but don't fail
-        print(f"Warning: No existing papers found for lab '{lab_name}' to use as corpus.")
 
     # Format research areas for arXiv query
     arxiv_categories = [area[0].lower() for area in research_areas]
@@ -859,31 +833,6 @@ def recommend_papers(lab_name: str, time_period_days: int, num_papers: int):
         conn.close()
         return f"No new papers found matching the research areas of lab '{lab_name}' in the last {time_period_days} days."
     
-    # Use semantic similarity ranking if we have existing lab papers to compare against
-    if len(scored_papers) > 0 and len(lab_papers) > 0:
-        # Convert scored_papers to the format expected by rerank_papers
-        candidates = []
-        for paper, basic_score in scored_papers:
-            arxiv_id = paper.get_short_id()
-            candidates.append({
-                'paper_id': arxiv_id,
-                'title': paper.title,
-                'abstract': paper.summary,
-                'authors': ", ".join(str(a) for a in paper.authors),
-                'url': f"https://arxiv.org/abs/{arxiv_id}",
-                'paper_obj': paper  # Keep the original paper object for later use
-            })
-            
-        # Use semantic similarity ranking
-        ranked_candidates = rerank_papers(candidates, lab_papers)
-        
-        # Convert back to the format expected by the rest of the function
-        recommended_papers = [(paper['paper_obj'], paper['score']) for paper in ranked_candidates[:num_papers]]
-    else:
-        # If no lab papers for comparison or no candidates, keep the basic scoring
-        # Take top N papers as requested
-        recommended_papers = scored_papers[:num_papers]
-    
     # Download and add the recommended papers to the recommendation collection
     papers_added = []
     
@@ -904,10 +853,9 @@ def recommend_papers(lab_name: str, time_period_days: int, num_papers: int):
             current_date = datetime.now().strftime("%Y-%m-%d")
             
             # Insert with 'recommendation' as author to distinguish from lab member papers
-            abstract = extract_abstract_from_arxiv(paper)
             cursor.execute(
-                "INSERT OR IGNORE INTO paper_tracking (lab_name, paper_id, title, author, date_added, pdf_path, abstract) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (lab_name, arxiv_id, paper.title, "recommendation", current_date, filepath, abstract),
+                "INSERT OR IGNORE INTO paper_tracking (lab_name, paper_id, title, author, date_added, pdf_path) VALUES (?, ?, ?, ?, ?, ?)",
+                (lab_name, arxiv_id, paper.title, "recommendation", current_date, filepath),
             )
             
             # Add to vector database if recommendation store exists
@@ -1003,7 +951,7 @@ def crawl_semantic_scholar(lab_name: str):
     cursor.execute(
         """CREATE TABLE IF NOT EXISTS paper_tracking
              (lab_name text, paper_id text, title text, author text, date_added text, 
-             pdf_path text, abstract text, PRIMARY KEY (lab_name, paper_id))"""
+             pdf_path text, PRIMARY KEY (lab_name, paper_id))"""
     )
 
     # Create a collection for the lab if it doesn't exist
@@ -1145,10 +1093,9 @@ def crawl_semantic_scholar(lab_name: str):
                     
                     # Add to tracking database
                     current_date = datetime.now().strftime("%Y-%m-%d")
-                    abstract = extract_abstract_from_arxiv(result)
                     cursor.execute(
-                        "INSERT INTO paper_tracking (lab_name, paper_id, title, author, date_added, pdf_path, abstract) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        (lab_name, paper_id, result.title, member_name, current_date, filepath, abstract),
+                        "INSERT INTO paper_tracking (lab_name, paper_id, title, author, date_added, pdf_path) VALUES (?, ?, ?, ?, ?, ?)",
+                        (lab_name, paper_id, result.title, member_name, current_date, filepath),
                     )
                     
                     # Load and add to vector database
@@ -1485,10 +1432,10 @@ Related Papers Context (Top {related_papers_count}):
         from langchain_openai import ChatOpenAI
 
         # Ensure API key is loaded correctly
-        api_key = os.getenv("OPENAI_API_KEY")
+        api_key = os.getenv("OPENAI_API_KEY_AGENT")
         if not api_key:
             conn.close()
-            return "Error: OPENAI_API_KEY environment variable not set."
+            return "Error: OpenAI API key not set. Please set OPENAI_API_KEY_AGENT environment variable."
 
         llm = ChatOpenAI(
             model="gpt-4o", api_key=api_key, temperature=0.3
@@ -1573,7 +1520,7 @@ def check_new_papers_alt(lab_name: str):
         cursor.execute(
             """CREATE TABLE IF NOT EXISTS paper_tracking
                  (lab_name text, paper_id text, title text, author text, date_added text, 
-                 pdf_path text, abstract text, PRIMARY KEY (lab_name, paper_id))"""
+                 pdf_path text, PRIMARY KEY (lab_name, paper_id))"""
         )
 
         # Create lab collection if it doesn't exist
@@ -1708,10 +1655,9 @@ def check_new_papers_alt(lab_name: str):
                         
                         # Add to tracking database
                         current_date = datetime.now().strftime("%Y-%m-%d")
-                        abstract = extract_abstract_from_arxiv(result)
                         cursor.execute(
-                            "INSERT INTO paper_tracking (lab_name, paper_id, title, author, date_added, pdf_path, abstract) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                            (lab_name, paper_id, result.title, member_name, current_date, filepath, abstract),
+                            "INSERT INTO paper_tracking (lab_name, paper_id, title, author, date_added, pdf_path) VALUES (?, ?, ?, ?, ?, ?)",
+                            (lab_name, paper_id, result.title, member_name, current_date, filepath),
                         )
                         
                         # Load and add to vector database
@@ -1748,7 +1694,7 @@ def check_new_papers_alt(lab_name: str):
                         import traceback
                         tb_str = traceback.format_exc()
                         errors.append(f"Error processing paper '{paper_title}' (ID: {arxiv_id}): {str(e)}\n{tb_str}")
-                    
+                
                 # Wait between different authors to avoid hitting rate limits
                 time.sleep(10)
                 
@@ -2182,10 +2128,10 @@ Related Papers Context (Top {related_papers_count}):
         from langchain_openai import ChatOpenAI
 
         # Ensure API key is loaded correctly
-        api_key = os.getenv("OPENAI_API_KEY")
+        api_key = os.getenv("OPENAI_API_KEY_AGENT")
         if not api_key:
             conn.close()
-            return "Error: OPENAI_API_KEY environment variable not set."
+            return "Error: OpenAI API key not set. Please set OPENAI_API_KEY_AGENT environment variable."
 
         llm = ChatOpenAI(
             model="gpt-4o", api_key=api_key, temperature=0.3
@@ -2226,520 +2172,3 @@ Place the paper in the context of the provided related research snippets.
         import traceback
         tb_str = traceback.format_exc()
         return f"Error generating paper summary for arXiv:{arxiv_id}: {str(e)}\n{tb_str}"
-
-
-@function_tool
-def summarize_latest_lab_paper(lab_name: str, related_papers_count: int = 3, show_all_papers: bool = False):
-    """
-    Find and summarize the latest paper from a lab (across all authors).
-    
-    Args:
-        lab_name: The name of the lab
-        related_papers_count: Number of related papers to include for context (default: 3)
-        show_all_papers: If True, will return a list of all papers instead of a summary
-        
-    Returns:
-        A comprehensive summary of the lab's latest paper with context from related papers,
-        or an error message if no papers are found
-    """
-    lab_name = lab_name.lower()
-    
-    # Connect to the database
-    conn = sqlite3.connect(SQLITE_DB_PATH)
-    cursor = conn.cursor()
-    
-    # Check if lab exists
-    cursor.execute("SELECT * FROM labs WHERE lab_name = ?", (lab_name,))
-    lab_info = cursor.fetchone()
-    
-    if not lab_info:
-        conn.close()
-        return f"Lab '{lab_name}' does not exist"
-    
-    # Get all papers from this lab
-    cursor.execute(
-        """SELECT paper_id, title, author, date_added, pdf_path 
-           FROM paper_tracking 
-           WHERE lab_name = ?""",
-        (lab_name,),
-    )
-    
-    all_papers = cursor.fetchall()
-    
-    if not all_papers:
-        conn.close()
-        return f"No papers found for lab '{lab_name}'"
-    
-    # If user wants to see all papers, return the list
-    if show_all_papers:
-        paper_list = f"Papers in {lab_name} lab:\n\n"
-        for i, (paper_id, title, author, date_added, _) in enumerate(all_papers, 1):
-            paper_list += f"{i}. {title} (arXiv:{paper_id}) - Author: {author} - Added: {date_added}\n"
-        conn.close()
-        return paper_list
-    
-    # Find the latest paper by analyzing arXiv IDs and date_added
-    # ArXiv IDs often have the format YYMM.NNNNN for papers from 2007 onward
-    latest_paper = None
-    latest_arxiv_year_month = 0
-    latest_date_added = "0000-00-00"
-    
-    for paper in all_papers:
-        paper_id, title, author, date_added, pdf_path = paper
-        
-        # Parse arXiv ID to get publication date info (if possible)
-        try:
-            if "." in paper_id:
-                prefix = paper_id.split(".")[0]
-                if len(prefix) == 4 and prefix.isdigit():
-                    arxiv_year_month = int(prefix)
-                    
-                    # Compare with current latest
-                    if arxiv_year_month > latest_arxiv_year_month:
-                        latest_arxiv_year_month = arxiv_year_month
-                        latest_paper = paper
-                    elif arxiv_year_month == latest_arxiv_year_month:
-                        # If same year/month, use date_added as tiebreaker
-                        if date_added > latest_date_added:
-                            latest_date_added = date_added
-                            latest_paper = paper
-            else:
-                # Fallback to date_added for papers with old-style IDs
-                if date_added > latest_date_added:
-                    latest_date_added = date_added
-                    latest_paper = paper
-        except Exception:
-            # If we can't parse the ID, just use date_added
-            if date_added > latest_date_added:
-                latest_date_added = date_added
-                latest_paper = paper
-    
-    # If we couldn't determine by arXiv ID, fallback to most recently added
-    if not latest_paper:
-        for paper in all_papers:
-            _, _, _, date_added, _ = paper
-            if date_added > latest_date_added:
-                latest_date_added = date_added
-                latest_paper = paper
-    
-    # If still no latest paper found (unlikely), just use the first one
-    if not latest_paper and all_papers:
-        latest_paper = all_papers[0]
-    
-    arxiv_id, title, author_name, date_added, pdf_path = latest_paper
-    
-    # Verify that the date_added is not in the future (which would indicate bad data)
-    try:
-        paper_date = datetime.strptime(date_added, "%Y-%m-%d").date()
-        today = datetime.now().date()
-        if paper_date > today:
-            print(f"WARNING: Paper has a future date in the database: {date_added}. This may indicate incorrect data.")
-    except:
-        print(f"WARNING: Could not verify date format for: {date_added}")
-    
-    # Display which paper we're summarizing
-    print(f"Summarizing latest paper in lab '{lab_name}': '{title}' (arXiv:{arxiv_id}) by {author_name} from {date_added}")
-    
-    # First, check if the PDF file exists
-    if not os.path.exists(pdf_path):
-        print(f"PDF file not found at recorded path: {pdf_path}")
-        
-        # Create the directory path if it doesn't exist
-        lab_data_dir = os.path.join(DEFAULT_DATA_DIR, lab_name)
-        Path(lab_data_dir).mkdir(parents=True, exist_ok=True)
-        
-        # Try alternative format for the filename
-        safe_arxiv_id = arxiv_id.replace("/", "_").replace(".", "_")
-        alternative_path = os.path.join(lab_data_dir, f"{safe_arxiv_id}.pdf")
-        
-        if os.path.exists(alternative_path):
-            print(f"Found PDF at alternative path: {alternative_path}")
-            pdf_path = alternative_path
-        else:
-            print(f"Attempting to download the paper from arXiv...")
-            
-            try:
-                # Try to download the PDF using arXiv API
-                client = arxiv.Client(num_retries=5, delay_seconds=5)
-                search = arxiv.Search(id_list=[arxiv_id])
-                paper = next(client.results(search), None)
-                
-                if paper:
-                    # Download the PDF
-                    filename = f"{safe_arxiv_id}.pdf"
-                    pdf_path = os.path.join(lab_data_dir, filename)
-                    paper.download_pdf(dirpath=lab_data_dir, filename=filename)
-                    
-                    # Update the database with the new path
-                    cursor.execute(
-                        "UPDATE paper_tracking SET pdf_path = ? WHERE lab_name = ? AND paper_id = ?",
-                        (pdf_path, lab_name, arxiv_id)
-                    )
-                    conn.commit()
-                    
-                    print(f"Successfully downloaded paper to {pdf_path}")
-                else:
-                    conn.close()
-                    return f"Error: Could not find paper with arXiv ID {arxiv_id} on arXiv. The paper might be in the database but is no longer available."
-            except Exception as e:
-                conn.close()
-                return f"Error: Failed to download PDF for arXiv:{arxiv_id}. Please try again later. Details: {str(e)}"
-    
-    # Rest of the implementation for summarization
-    try:
-        if not os.path.exists(pdf_path):
-            conn.close()
-            return f"Error: PDF file still not found after recovery attempts. Path: {pdf_path}"
-
-        # Get the ArXiv API client
-        client = arxiv.Client(num_retries=5, delay_seconds=5)
-
-        # First, load the PDF for embedding
-        try:
-            loader = PyPDFLoader(pdf_path)
-            target_paper_docs = loader.load()
-            
-            if not target_paper_docs:
-                conn.close()
-                return f"Error: The PDF file at {pdf_path} appears to be empty or corrupted."
-                
-        except Exception as pdf_error:
-            conn.close()
-            return f"Error: Could not load the PDF file. The file may be corrupted. Details: {str(pdf_error)}"
-
-        # Also get abstract from arXiv API if possible
-        abstract = ""
-        try:
-            # Get paper from ArXiv API
-            search = arxiv.Search(id_list=[arxiv_id])
-            paper = next(client.results(search), None)
-
-            if paper:
-                abstract = paper.summary
-        except Exception as e:
-            print(f"Warning: Error getting abstract from arXiv API: {e}")
-            # Continue without abstract rather than failing completely
-
-        # Combine all page content for searching related papers AND for summarization
-        full_paper_text = "\n\n".join([doc.page_content for doc in target_paper_docs])
-
-        # Use the entire paper for similarity search
-        search_text = full_paper_text
-
-        # Get lab papers collection to find related papers
-        collection_name = f"{lab_name}_papers"
-        lab_related = []
-        try:
-            vector_store = Chroma(
-                collection_name=collection_name,
-                embedding_function=embeddings,
-                persist_directory=CHROMA_PERSIST_DIRECTORY,
-            )
-            lab_related = vector_store.similarity_search(
-                search_text, k=related_papers_count
-            )
-        except Exception as e:
-            print(f"Warning: Error searching lab collection: {e}")
-            # Continue without lab related papers
-
-        # Try to get recommendation collection as well
-        recommendation_collection_name = f"recommendation_for_{lab_name}"
-        recommendation_related = []
-        try:
-            recommendation_store = Chroma(
-                collection_name=recommendation_collection_name,
-                embedding_function=embeddings,
-                persist_directory=CHROMA_PERSIST_DIRECTORY,
-            )
-            recommendation_related = recommendation_store.similarity_search(
-                search_text, k=related_papers_count
-            )
-        except Exception as e:
-            print(f"Warning: Error searching recommendation collection: {e}")
-            # Continue without recommendation related papers
-
-        all_related = lab_related + recommendation_related
-
-        # Extract titles and brief content from related papers, filtering out the target paper
-        related_info = []
-        processed_related_ids = set()
-
-        # Try to get related paper sections from their LaTeX sources
-        for doc in all_related:
-            related_arxiv_id = doc.metadata.get("paper_id")  # paper_id is arxiv_id
-
-            if (
-                related_arxiv_id
-                and related_arxiv_id != arxiv_id
-                and related_arxiv_id not in processed_related_ids
-            ):
-                related_title = doc.metadata.get("title", "Unknown title")
-                related_data = {
-                    "title": related_title,
-                    "arxiv_id": related_arxiv_id,
-                    "content_sample": doc.page_content[:250] + "...",  # Default content
-                }
-
-                # Try to get semantic sections for this related paper
-                try:
-                    # Fetch from ArXiv API
-                    rel_search = arxiv.Search(id_list=[related_arxiv_id])
-                    rel_paper = next(client.results(rel_search), None)
-
-                    if rel_paper:
-                        # We have the related paper - try to get sections from LaTeX
-                        rel_intro = ""
-                        rel_concl = ""
-
-                        with TemporaryDirectory() as rel_tmpdir:
-                            try:
-                                rel_source_path = rel_paper.download_source(
-                                    dirpath=rel_tmpdir
-                                )
-
-                                if rel_source_path and rel_source_path.endswith(
-                                    ".tar.gz"
-                                ):
-                                    with tarfile.open(rel_source_path) as rel_tar:
-                                        rel_tex_files = [
-                                            f
-                                            for f in rel_tar.getnames()
-                                            if f.endswith(".tex")
-                                        ]
-
-                                        if rel_tex_files:
-                                            # Look for main tex file or combine all
-                                            rel_content = ""
-                                            for rel_tex in rel_tex_files:
-                                                try:
-                                                    f = rel_tar.extractfile(rel_tex)
-                                                    if f:
-                                                        content = f.read().decode(
-                                                            "utf-8", errors="ignore"
-                                                        )
-                                                        rel_content += content + "\n\n"
-                                                except Exception as e:
-                                                    print(
-                                                        f"Error reading related tex file {rel_tex}: {e}"
-                                                    )
-
-                                            # Clean content
-                                            rel_content = re.sub(
-                                                r"%.*\n", "\n", rel_content
-                                            )
-
-                                            # Extract introduction and conclusion sections
-                                            rel_intro_match = re.search(
-                                                r"\\section\{(?:Introduction|INTRODUCTION|introduction)\}(.*?)(?:\\section|\\end\{document\}|\\bibliography|\\appendix)",
-                                                rel_content,
-                                                re.DOTALL,
-                                            )
-                                            if rel_intro_match:
-                                                rel_intro = rel_intro_match.group(
-                                                    1
-                                                ).strip()
-                                                # Limit the size of introduction text
-                                                if len(rel_intro) > 500:
-                                                    rel_intro = rel_intro[:500] + "..."
-
-                                            rel_concl_match = re.search(
-                                                r"\\section\{(?:Conclusion|CONCLUSION|conclusion|Conclusions|CONCLUSIONS|conclusions)\}(.*?)(?:\\section|\\end\{document\}|\\bibliography|\\appendix)",
-                                                rel_content,
-                                                re.DOTALL,
-                                            )
-                                            if rel_concl_match:
-                                                rel_concl = rel_concl_match.group(
-                                                    1
-                                                ).strip()
-                                                # Limit the size
-                                                if len(rel_concl) > 500:
-                                                    rel_concl = rel_concl[:500] + "..."
-
-                            except Exception as e:
-                                print(
-                                    f"Error processing LaTeX for related paper {related_arxiv_id}: {e}"
-                                )
-
-                        # If we got sections, use them
-                        if rel_intro or rel_concl:
-                            section_text = ""
-                            if rel_intro:
-                                section_text += "Intro: " + rel_intro + "\n"
-                            if rel_concl:
-                                section_text += "Concl: " + rel_concl
-
-                            # Update the related paper data with sections if we found them
-                            if section_text:
-                                related_data["content_sample"] = (
-                                    section_text[:500] + "..."
-                                )
-
-                except Exception as e:
-                    print(
-                        f"Error getting data for related paper {related_arxiv_id}: {e}"
-                    )
-
-                # Add the related paper to our list
-                related_info.append(related_data)
-                processed_related_ids.add(related_arxiv_id)
-
-        # Prepare the main content for the summarization prompt
-        # For the main paper, we'll use the full text to provide complete information
-        # If the abstract is available, add it at the beginning for context
-        if abstract:
-            prompt_main_content = f"Abstract:\n{abstract}\n\n"
-            prompt_main_content += f"Full Paper Content:\n{full_paper_text}"
-        else:
-            prompt_main_content = f"Full Paper Content:\n{full_paper_text}"
-
-        # Check if the content is too long - if so, we need to truncate intelligently
-        # A typical approach is to keep beginning, important middle parts, and end
-        max_content_length = 25000  # Set a reasonable limit to avoid token overflow
-        if len(prompt_main_content) > max_content_length:
-            first_part = prompt_main_content[: max_content_length // 3]
-            middle_index = len(prompt_main_content) // 2
-            middle_part = prompt_main_content[
-                middle_index
-                - (max_content_length // 6) : middle_index
-                + (max_content_length // 6)
-            ]
-            last_part = prompt_main_content[-max_content_length // 3 :]
-
-            prompt_main_content = f"{first_part}\n\n[...content truncated for length...]\n\n{middle_part}\n\n[...content truncated for length...]\n\n{last_part}"
-
-        # Format summary input with related papers context
-        summary_input = f"""
-Target Paper: {title} (arXiv:{arxiv_id}) by {author_name}
-
-Main Content:
-{prompt_main_content}
-
----
-Related Papers Context (Top {related_papers_count}):
-"""
-
-        if related_info:
-            for i, related in enumerate(related_info[:related_papers_count]):
-                summary_input += f"{i+1}. {related['title']} (arXiv:{related['arxiv_id']})\n   Sample: {related['content_sample']}\n\n"
-        else:
-            summary_input += "No relevant related papers found in the collections.\n"
-
-        # Use OpenAI to generate summary
-        from langchain_openai import ChatOpenAI
-
-        # Ensure API key is loaded correctly
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            conn.close()
-            return "Error: OPENAI_API_KEY environment variable not set."
-
-        llm = ChatOpenAI(
-            model="gpt-4o", api_key=api_key, temperature=0.3
-        )  # Lower temperature for factual summary
-
-        prompt = f"""
-You are a scientific research assistant AI. Your task is to create a comprehensive, factual, and objective summary of a target academic paper.
-Place the paper in the context of the provided related research snippets.
-
-**Instructions:**
-1.  **Target Paper Focus:** Primarily summarize the target paper: its core problem, methods, key findings, and contributions.
-2.  **Contextualize:** Briefly explain how the target paper relates to the provided related papers.
-3.  **Structure:** Organize the summary logically (Introduction/Problem, Methods, Results, Relation to Context, Conclusion/Significance).
-4.  **Tone:** Maintain an academic, neutral, and objective tone.
-5.  **Length:** Aim for approximately 400-600 words.
-
-**Paper Information & Context:**
-{summary_input}
-
----
-**Generate the summary now:**
-"""
-
-        try:
-            response = llm.invoke(prompt)
-            summary = response.content
-            conn.close()
-            return summary
-        except Exception as e:
-            conn.close()
-            return f"Error calling OpenAI API for summarization: {str(e)}"
-
-    except FileNotFoundError as fnf_error:
-        conn.close()
-        return f"Error: PDF file not found at {pdf_path}. Specific error: {str(fnf_error)}"
-    except Exception as e:
-        conn.close()
-        import traceback
-        tb_str = traceback.format_exc()
-        return f"Error generating paper summary for arXiv:{arxiv_id}: {str(e)}\n{tb_str}"
-
-
-def rerank_papers(candidate_papers: list[dict], corpus_papers: list[dict], model: str = 'avsolatorio/GIST-small-Embedding-v0') -> list[dict]:
-    """
-    Rerank papers using semantic similarity and time decay.
-    
-    Args:
-        candidate_papers: List of papers to score
-        corpus_papers: List of papers to compare against
-        model: Name of the sentence transformer model to use
-        
-    Returns:
-        List of papers sorted by score
-    """
-    print("loading SentenceTransformer embedding model")
-    encoder = SentenceTransformer(model)
-    
-    # Sort corpus by date, from newest to oldest
-    corpus_papers = sorted(corpus_papers, 
-                         key=lambda x: datetime.strptime(x.get('date', '1970-01-01'), '%Y-%m-%d'),
-                         reverse=True)
-    
-    # Calculate time decay weights
-    time_decay_weight = 1 / (1 + np.log10(np.arange(len(corpus_papers)) + 1))
-    time_decay_weight = time_decay_weight / time_decay_weight.sum()
-    
-    # Get paper text for encoding - use titles if abstracts are empty
-    corpus_texts = []
-    for paper in corpus_papers:
-        abstract = paper.get('abstract', '')
-        if abstract and len(abstract.strip()) > 10:  # Use abstract if available and non-empty
-            corpus_texts.append(abstract)
-        else:  # Fallback to title
-            corpus_texts.append(paper.get('title', ''))
-    
-    candidate_texts = []
-    for paper in candidate_papers:
-        abstract = paper.get('abstract', '')
-        if abstract and len(abstract.strip()) > 10:  # Use abstract if available and non-empty
-            candidate_texts.append(abstract)
-        else:  # Fallback to title
-            candidate_texts.append(paper.get('title', ''))
-    
-    # Encode texts (abstracts or titles)
-    corpus_features = encoder.encode(corpus_texts)
-    candidate_features = encoder.encode(candidate_texts)
-    
-    # Calculate similarity scores
-    similarity = encoder.similarity(candidate_features, corpus_features)
-    scores = (similarity * time_decay_weight).sum(axis=1) * 10
-    
-    # Add scores to papers and sort
-    for score, paper in zip(scores, candidate_papers):
-        paper['score'] = float(score)
-    
-    return sorted(candidate_papers, key=lambda x: x['score'], reverse=True)
-
-
-def extract_abstract_from_arxiv(paper):
-    """
-    Extract the abstract from an arxiv paper object.
-    
-    Args:
-        paper: The arxiv paper object
-        
-    Returns:
-        The abstract text or empty string if not available
-    """
-    if hasattr(paper, 'summary') and paper.summary:
-        return paper.summary.strip()
-    return ""

@@ -12,7 +12,13 @@ from langchain_openai import OpenAIEmbeddings
 dotenv_path = os.path.join(os.path.dirname(__file__), "..", ".env")
 load_dotenv(dotenv_path)
 
-embeddings = OpenAIEmbeddings(model=os.getenv("OPENAI_EMBEDDING_MODEL"))
+# Use the agent API key for embeddings
+embeddings_api_key = os.getenv("OPENAI_API_KEY_AGENT")
+embeddings = OpenAIEmbeddings(
+    model=os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-large"),
+    api_key=embeddings_api_key
+)
+
 
 
 @function_tool
