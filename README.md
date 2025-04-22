@@ -50,6 +50,33 @@ The agent now supports robust academic paper management and recommendation featu
 - Draw insights from both lab papers and recommended papers
 - Provide academic-style summaries with key findings, methodologies, and relationships to existing research
 
+## New Features: Paper Recommendation and Summary
+
+The agent now supports robust academic paper management and recommendation features:
+
+### Research Lab Management
+
+- Create lab collections with persistent information (name, institution, leader, members, etc.)
+- Add lab members with their Google Scholar profiles
+- Track papers published by lab members
+
+### Paper Collection and Recommendation
+
+- Automatically crawl Google Scholar pages of lab members to collect their arXiv papers
+- Check for new papers by lab members during conversations
+- Store PDF documents in the data directory with proper organization
+- Recommend relevant papers from arXiv based on the lab's research interests and time period
+- Save recommended papers and their embeddings to prevent duplication
+
+### Paper Summarization
+
+- Generate comprehensive paper summaries for specific lab member papers
+- Utilize complete paper content for more thorough and accurate summaries of target papers
+- Extract semantic sections (introduction, conclusion) from LaTeX source files of related papers when available
+- Include contextual information from related papers in the lab collection
+- Draw insights from both lab papers and recommended papers
+- Provide academic-style summaries with key findings, methodologies, and relationships to existing research
+
 ## LinkedIn Integration
 
 ### Setting Up LinkedIn API Access
@@ -113,6 +140,7 @@ The LinkedIn publisher is available as an agent tool and can be used with the fo
 │   │   ├── paper_crawler.py # Paper collection and recommendation tools
 │   │   └── linkedin_publisher.py # LinkedIn posting automation
 │   ├── agent.py             # Core agent implementation
+│   ├── paper_recommendation_agent.py # Specialized paper recommendation agent
 │   ├── data/                # Data storage directory
 │   │   ├── <lab_name>/      # Lab-specific paper PDFs
 │   │   └── recommendation/  # Recommended paper PDFs
@@ -126,6 +154,7 @@ The LinkedIn publisher is available as an agent tool and can be used with the fo
 - Python 3.11 or higher
 - OpenAI API key (gpt-4o model for paper summarization and embeddings)
 - Internet connection for accessing Google Scholar and arXiv
+- (Optional) GitHub, Slack, or Google credentials for additional features
 
 ## Installation
 
@@ -174,10 +203,16 @@ cd stateful_agent
 mkdir -p data/recommendation
 ```
 
-2. Run the agent:
+2. Run the agent in terminal mode:
 
 ```bash
-python agent.py
+uv run stateful-agent deploy-agent --file agent.py --mode terminal
+```
+
+3. Run the agent in web mode:
+
+```bash
+uv run stateful-agent deploy-agent --file agent.py --mode web
 ```
 
 3. Example interactions:
@@ -207,8 +242,10 @@ python agent.py
 # Generate a paper summary
 > Summarize the latest paper by Haozhi Qi from vision_research_lab
 
-# Share paper summary on LinkedIn
-> Share the paper summary on LinkedIn publicly with appropriate hashtags
+> Summarize the latest paper from vision_research_lab
+
+# Delete the lab
+> Delete the lab vision_research_lab
 ```
 
 ## Development

@@ -13,20 +13,22 @@ from tools.chromadb import (add_pdf_documents, create_collection,
 from tools.paper_crawler import (check_new_papers, crawl_scholar_papers,
                                  generate_paper_summary, recommend_papers,
                                  crawl_semantic_scholar, check_new_papers_alt,
-                                 summarize_latest_author_paper)
-from tools.sqlite import (add_lab_member, create_lab, get_all_labs,
+                                 summarize_latest_author_paper, summarize_latest_lab_paper)
+from tools.sqlite import (add_lab_member, create_lab, delete_lab, get_all_labs,
                           get_lab_info, get_user_data, insert_user_data,
-                          update_lab_website, update_lab_description, add_research_area)
-from tools.linkedin_publisher import publish_linkedin_post, publish_paper_to_linkedin, search_and_publish_paper
-from tools.paper_scraper import scrape_papers, save_papers_to_db, create_linkedin_post_from_paper
+                          update_lab_website, update_lab_description, add_research_area,
+                          migrate_paper_tracking_schema)
 
+# Initialize database schema
+try:
+    migrate_paper_tracking_schema()
+except Exception as e:
+    print(f"Error migrating schema: {str(e)}")
 
 def agent(pocket: PocketLangchain):
     tools = pocket.get_tools()
 
-    # Use the appropriate API key for the agent
-    agent_api_key = os.getenv("OPENAI_API_KEY_AGENT")
-    llm = ChatOpenAI(model="gpt-4o", api_key=agent_api_key)
+    llm = ChatOpenAI(model="gpt-4o", api_key=os.getenv("OPENAI_API_KEY"))
 
     prompt = ChatPromptTemplate.from_messages(
         [
@@ -42,7 +44,6 @@ def agent(pocket: PocketLangchain):
                 - Check for new papers by lab members
                 - Recommend relevant papers from arXiv based on lab research interests
                 - Generate comprehensive paper summaries that include context from related research
-                - Publish paper summaries to LinkedIn with PDF attachments
                 
                 When referring to labs, always use lowercase for the lab_name parameter.
                 User names should not contain special characters or spaces.
@@ -118,22 +119,16 @@ if __name__ == "__main__":
             update_lab_website,
             update_lab_description,
             add_research_area,
+            delete_lab,
             *from_dock(fileio_dock()),
             add_pdf_documents,
             query_collection,
-            crawl_scholar_papers,
-            check_new_papers,
             crawl_semantic_scholar,
             check_new_papers_alt,
             recommend_papers,
             generate_paper_summary,
             summarize_latest_author_paper,
-            scrape_papers,
-            save_papers_to_db,
-            publish_linkedin_post,
-            publish_paper_to_linkedin,
-            search_and_publish_paper,
-            create_linkedin_post_from_paper,
+            summarize_latest_lab_paper,
         ],
     ) as pocket:
         agent(pocket)

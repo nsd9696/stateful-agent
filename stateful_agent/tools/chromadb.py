@@ -20,6 +20,7 @@ embeddings = OpenAIEmbeddings(
 )
 
 
+
 @function_tool
 def create_collection(collection_name: str):
     """
