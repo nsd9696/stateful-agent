@@ -11,6 +11,8 @@ license = "MIT"
 keywords = ["agent", "langchain", "chromadb", "sqlite", "vector-database"]
 dependencies = [
     "chromadb>=0.6.3",
+    "fastapi>=0.115.12",
+    "flask>=3.1.0",
     "hyperdock-fileio>=0.5.3",
     "hyperpocket>=0.5.2",
     "hyperpocket-langchain>=0.5.2",
@@ -36,9 +38,15 @@ dev = [
     "mypy>=1.0",
 ]
 
+[project.scripts]
+stateful-agent = "stateful_agent.cli.__main__:cli"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["stateful_agent"]
 
 [tool.black]
 line-length = 100

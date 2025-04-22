@@ -138,10 +138,16 @@ cd stateful_agent
 mkdir -p data/recommendation
 ```
 
-2. Run the agent:
+2. Run the agent in terminal mode:
 
 ```bash
-uv run python paper_recommendation_agent.py
+uv run stateful-agent deploy-agent --file agent.py --mode terminal
+```
+
+3. Run the agent in web mode:
+
+```bash
+uv run stateful-agent deploy-agent --file agent.py --mode web
 ```
 
 3. Example interactions:
