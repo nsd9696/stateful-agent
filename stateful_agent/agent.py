@@ -79,7 +79,7 @@ class SimpleStatefulAgent(StatefulAgentExecutor):
             if user_input == "q":
                 print("Good bye!")
                 break
-
+                
             response = executor.invoke({"input": user_input})
             print("langchain agent : ", response["output"])
             print()

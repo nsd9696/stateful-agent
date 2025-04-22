@@ -22,6 +22,12 @@ dependencies = [
     "langchain-openai>=0.3.1",
     "pypdf>=5.4.0",
     "python-dotenv>=1.0.0",
+    "arxiv>=2.1.0",
+    "beautifulsoup4>=4.13.0",
+    "numpy>=1.26.0",
+    "requests>=2.30.0",
+    "tzlocal>=5.0.0",
+    "sentence-transformers>=2.2.2",
 ]
 
 [project.optional-dependencies]
@@ -49,3 +55,6 @@ target-version = ["py311"]
 [tool.isort]
 profile = "black"
 line_length = 100
+
+[tool.hatch.build.targets.wheel]
+packages = ["stateful_agent"]

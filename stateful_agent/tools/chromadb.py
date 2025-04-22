@@ -1,17 +1,19 @@
 import os
-import chromadb
-from langchain_chroma import Chroma
-from langchain_core.documents import Document
-from langchain_community.document_loaders import PyPDFLoader
-from hyperpocket.tool import function_tool
-from langchain_openai import OpenAIEmbeddings
-from dotenv import load_dotenv
 from uuid import uuid4
+
+import chromadb
+from dotenv import load_dotenv
+from hyperpocket.tool import function_tool
+from langchain_chroma import Chroma
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_core.documents import Document
+from langchain_openai import OpenAIEmbeddings
 
 dotenv_path = os.path.join(os.path.dirname(__file__), "..", ".env")
 load_dotenv(dotenv_path)
 
 embeddings = OpenAIEmbeddings(model=os.getenv("OPENAI_EMBEDDING_MODEL"))
+
 
 @function_tool
 def create_collection(collection_name: str):
@@ -22,7 +24,7 @@ def create_collection(collection_name: str):
     vector_store = Chroma(
         collection_name=collection_name,
         embedding_function=embeddings,
-        persist_directory=os.getenv("CHROMA_PERSIST_DIRECTORY")
+        persist_directory=os.getenv("CHROMA_PERSIST_DIRECTORY"),
     )
     return vector_store
 
@@ -38,7 +40,7 @@ def add_pdf_documents(collection_name: str, pdf_path: str):
     vector_store = Chroma(
         collection_name=collection_name,
         embedding_function=embeddings,
-        persist_directory=os.getenv("CHROMA_PERSIST_DIRECTORY")
+        persist_directory=os.getenv("CHROMA_PERSIST_DIRECTORY"),
     )
     loader = PyPDFLoader(pdf_path)
     documents = loader.load()
@@ -56,10 +58,11 @@ def query_collection(collection_name: str, query: str):
     vector_store = Chroma(
         collection_name=collection_name,
         embedding_function=embeddings,
-        persist_directory=os.getenv("CHROMA_PERSIST_DIRECTORY")
+        persist_directory=os.getenv("CHROMA_PERSIST_DIRECTORY"),
     )
     results = vector_store.similarity_search(query)
     return results
+
 
 @function_tool
 def delete_collection(collection_name: str):
@@ -79,5 +82,3 @@ def get_collection_names():
 @function_tool
 def get_collection_info(collection_name: str):
     pass
-
-
