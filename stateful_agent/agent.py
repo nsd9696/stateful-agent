@@ -32,7 +32,12 @@ class SimpleStatefulAgent(StatefulAgentExecutor):
 
             tools = pocket.get_tools()
 
-        llm = ChatOpenAI(model="gpt-4o", api_key=os.getenv("OPENAI_API_KEY"))
+        # Use the appropriate API key for the agent
+        agent_api_key = os.getenv("OPENAI_API_KEY_AGENT")
+        if not agent_api_key:
+            raise ValueError("OPENAI_API_KEY_AGENT environment variable not set")
+            
+        llm = ChatOpenAI(model="gpt-4o", api_key=agent_api_key)
 
         prompt = ChatPromptTemplate.from_messages(
             [

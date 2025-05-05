@@ -20,6 +20,12 @@ DEFAULT_DATA_DIR=./data
 # LinkedIn Configuration
 LINKEDIN_USER_ID=your_linkedin_user_id
 LINKEDIN_ACCESS_TOKEN=your_linkedin_access_token
+
+# Rednote (Xiaohongshu) Configuration
+REDNOTE_USER_ID=your_rednote_user_id
+REDNOTE_ACCESS_TOKEN=your_rednote_access_token
+REDNOTE_COOKIES_PATH=~/.rednote_system/rednote_cookies.json
+REDNOTE_TOKEN_PATH=~/.rednote_system/rednote_token.json
 ```
 
 ### API Key Usage

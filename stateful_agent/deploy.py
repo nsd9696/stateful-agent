@@ -2,7 +2,7 @@ import os
 import sys
 import argparse
 from flask import Flask, render_template, request, jsonify
-from agent import agent, cli_mode
+from agent import SimpleStatefulAgent
 from hyperpocket_langchain import PocketLangchain
 from tools.chromadb import create_collection, add_pdf_documents, query_collection
 from tools.sqlite import insert_user_data, get_user_data
@@ -33,7 +33,7 @@ def create_agent():
             query_collection,
         ],
     ) as pocket:
-        agent_instance = agent(pocket)
+        agent_instance = SimpleStatefulAgent.create_agent(pocket)
     return agent_instance
 
 @app.route('/')
@@ -100,8 +100,8 @@ def main():
                 query_collection,
             ],
         ) as pocket:
-            agent_executor = agent(pocket)
-            cli_mode(agent_executor)
+            agent = SimpleStatefulAgent.create_agent(pocket)
+            agent.terminal_mode()
 
 if __name__ == '__main__':
     main() 

@@ -45,6 +45,7 @@ dependencies = [
     "feedparser==6.0.11",
     "filelock==3.17.0",
     "flatbuffers==25.2.10",
+    "flask>=3.0.0",
     "fonttools==4.56.0",
     "frozenlist==1.5.0",
     "fsspec==2025.3.0",

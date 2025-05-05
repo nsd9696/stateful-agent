@@ -36,7 +36,7 @@ def publish_linkedin_post(request: LinkedInPostRequest) -> LinkedInResponse:
             content: The content of the post
             pdf_data: Optional PDF data to attach to the post
             visibility: Post visibility setting ("PUBLIC" or "CONNECTIONS")
-        
+    
     Returns:
         LinkedInResponse: Response from LinkedIn API
     """
@@ -142,7 +142,7 @@ def publish_linkedin_post(request: LinkedInPostRequest) -> LinkedInResponse:
         # Make the API request
         response = requests.post(
             'https://api.linkedin.com/v2/ugcPosts',
-            headers=headers,
+        headers=headers,
             json=post_data
         )
         
