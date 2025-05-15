@@ -1,6 +1,6 @@
 import os
 from typing import Optional, List, Dict, Any, Tuple
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import requests
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
@@ -20,6 +20,7 @@ from io import BytesIO
 from langchain_openai import ChatOpenAI
 import openai
 import random
+from hyperpocket.tool import function_tool
 
 load_dotenv()
 
@@ -40,9 +41,9 @@ class PaperSearchRequest(BaseModel):
     download_pdfs: bool = True  # Whether to download PDFs for papers
 
 class PaperSearchResponse(BaseModel):
-    papers: List[dict]
+    papers: List[dict] = Field(default_factory=list)
     total_results: int
-    query_info: dict
+    query_info: dict = Field(default_factory=dict)
 
 class PaperSummaryRequest(BaseModel):
     paper_id: str
@@ -66,15 +67,20 @@ class PaperSummaryResponse(BaseModel):
     results: Optional[str] = None
     visual_elements: Optional[List[Dict[str, str]]] = None
 
-@sleep_and_retry
-@limits(calls=CALLS_PER_PERIOD, period=PERIOD_IN_SECONDS)
-def scrape_papers(request: PaperSearchRequest) -> PaperSearchResponse:
+@function_tool
+def scrape_papers(
+    research_area: str,
+    author_name: Optional[str] = None,
+    limit: int = 10,
+    year_from: Optional[int] = None,
+    sort_by: str = "relevance",
+    download_pdfs: bool = True
+) -> PaperSearchResponse:
     """
     Scrape papers from Semantic Scholar based on research area and optionally author name.
     Rate limited to 100 calls per 5 minutes.
     
     Args:
-        request: PaperSearchRequest containing:
             research_area: The research area/topic to search for
             author_name: Optional author name to filter by
             limit: Maximum number of papers to return (default: 10)
@@ -86,13 +92,21 @@ def scrape_papers(request: PaperSearchRequest) -> PaperSearchResponse:
         PaperSearchResponse: List of papers and metadata
         
     Example:
-        >>> response = scrape_papers(PaperSearchRequest(
+        >>> response = scrape_papers(
         ...     research_area="transformer architecture",
         ...     author_name="Vaswani",
         ...     limit=5,
         ...     year_from=2020
-        ... ))
+        ... )
     """
+    request = PaperSearchRequest(
+        research_area=research_area,
+        author_name=author_name,
+        limit=limit,
+        year_from=year_from,
+        sort_by=sort_by,
+        download_pdfs=download_pdfs
+    )
     base_url = "https://api.semanticscholar.org/graph/v1/paper/search"
     
     # Get API key from environment
@@ -470,246 +484,6 @@ def extract_results_from_text(text: str) -> Optional[str]:
     
     return None
 
-def generate_linkedin_post_with_chatgpt(paper_data: Dict[str, Any], pdf_text: str = "") -> str:
-    """
-    Generate a thoughtful LinkedIn post about a research paper using ChatGPT.
-    
-    Args:
-        paper_data: Dictionary containing paper metadata
-        pdf_text: Text extracted from the PDF (if available)
-        
-    Returns:
-        str: Generated LinkedIn post
-    """
-    try:
-        # Check if OpenAI API key is available
-        api_key = os.getenv("OPENAI_API_KEY_SUMMARIZER")
-        if not api_key:
-            print("OpenAI API key not found. Using fallback method.")
-            return format_linkedin_post_basic(paper_data)
-        
-        # Initialize ChatGPT with retry mechanism
-        for attempt in range(OPENAI_RATE_LIMIT_RETRIES):
-            try:
-                llm = ChatOpenAI(model="gpt-4o", api_key=api_key)
-                
-                # Prepare paper information
-                title = paper_data.get("title", "Untitled Paper")
-                authors = ", ".join(paper_data.get("authors", []))
-                year = paper_data.get("year", "")
-                abstract = paper_data.get("abstract", "")
-                citations = paper_data.get("citations", 0)
-                url = paper_data.get("url", "")
-                
-                # Create prompt for ChatGPT
-                prompt = f"""
-                Create a thoughtful and engaging LinkedIn post about this research paper:
-                
-                Title: {title}
-                Authors: {authors}
-                Year: {year}
-                Citations: {citations}
-                URL: {url}
-                
-                Abstract:
-                {abstract}
-                
-                """
-                
-                # Add PDF text if available
-                if pdf_text:
-                    prompt += f"""
-                    Additional content from the paper:
-                    {pdf_text[:2000]}  # Limit to first 2000 chars to avoid token limits
-                    """
-                
-                prompt += """
-                The LinkedIn post should:
-                1. Start with an attention-grabbing introduction
-                2. Highlight the key contributions and findings
-                3. Explain why this research is important
-                4. Include relevant hashtags
-                5. Be engaging and accessible to a general audience
-                6. Include emojis to make it visually appealing
-                7. End with a call to action or thought-provoking question
-                
-                Format the post with proper line breaks and structure.
-                """
-                
-                # Generate post with ChatGPT
-                response = llm.invoke(prompt)
-                post = response.content
-                
-                # Ensure the post doesn't exceed LinkedIn's character limit
-                if len(post) > 3000:
-                    post = post[:2997] + "..."
-                    
-                return post
-                
-            except openai.RateLimitError as e:
-                if attempt < OPENAI_RATE_LIMIT_RETRIES - 1:
-                    # Extract wait time from error message if possible
-                    wait_time = OPENAI_RETRY_DELAY
-                    if "try again in" in str(e):
-                        try:
-                            wait_time = int(str(e).split("try again in")[1].split("ms")[0].strip()) / 1000
-                        except:
-                            pass
-                    
-                    # Add jitter to avoid thundering herd
-                    wait_time += random.uniform(0.5, 1.5)
-                    print(f"OpenAI rate limit reached. Waiting {wait_time:.2f} seconds before retry...")
-                    time.sleep(wait_time)
-                else:
-                    print(f"OpenAI rate limit reached after {OPENAI_RATE_LIMIT_RETRIES} retries. Using fallback method.")
-                    return format_linkedin_post_basic(paper_data)
-                    
-            except Exception as e:
-                print(f"Error generating LinkedIn post with ChatGPT: {str(e)}")
-                if attempt < OPENAI_RATE_LIMIT_RETRIES - 1:
-                    time.sleep(OPENAI_RETRY_DELAY)
-                else:
-                    return format_linkedin_post_basic(paper_data)
-        
-        # If we get here, all retries failed
-        return format_linkedin_post_basic(paper_data)
-        
-    except Exception as e:
-        print(f"Error in generate_linkedin_post_with_chatgpt: {str(e)}")
-        return format_linkedin_post_basic(paper_data)
-
-def format_linkedin_post_basic(paper_data: Dict[str, Any]) -> str:
-    """
-    Format a basic LinkedIn post about a paper (fallback method).
-    
-    Args:
-        paper_data: Dictionary containing paper metadata
-        
-    Returns:
-        str: Formatted LinkedIn post
-    """
-    title = paper_data.get("title", "Untitled Paper")
-    authors = ", ".join(paper_data.get("authors", []))
-    year = paper_data.get("year", "")
-    abstract = paper_data.get("abstract", "")
-    citations = paper_data.get("citations", 0)
-    url = paper_data.get("url", "")
-    
-    post = f"🧠 {title} 🧠\n\n"
-    post += f"By {authors} ({year})\n\n"
-    post += f"{abstract}\n\n"
-    
-    if citations:
-        post += f"📚 Citations: {citations}\n\n"
-    
-    if url:
-        post += f"🔗 Read the full paper: {url}\n\n"
-    
-    post += "#AI #MachineLearning #Research #AcademicPaper #Innovation"
-    
-    # Ensure the post doesn't exceed LinkedIn's character limit
-    if len(post) > 3000:
-        post = post[:2997] + "..."
-        
-    return post
-
-def summarize_paper_for_linkedin(request: PaperSummaryRequest) -> PaperSummaryResponse:
-    """
-    Generate a comprehensive summary of a paper suitable for a LinkedIn post.
-    
-    Args:
-        request: PaperSummaryRequest containing:
-            paper_id: ID of the paper to summarize
-            max_length: Maximum length of the summary in characters
-            include_citations: Whether to include citation count
-            include_visuals: Whether to include visual elements
-            include_key_points: Whether to include key points
-            include_methodology: Whether to include methodology
-            include_results: Whether to include results
-            
-    Returns:
-        PaperSummaryResponse: Comprehensive summary of the paper
-    """
-    # Get paper data
-    paper = get_paper_by_id(request.paper_id)
-    if not paper:
-        return PaperSummaryResponse(
-            title="Paper not found",
-            authors=[],
-            year=0,
-            summary="The requested paper could not be found.",
-            citations=None,
-            url=None,
-            pdf_path=None,
-            key_points=None,
-            methodology=None,
-            results=None,
-            visual_elements=None
-        )
-    
-    # Extract text from PDF if available
-    pdf_text = ""
-    if paper.get("pdf_path") and os.path.exists(paper["pdf_path"]):
-        pdf_text = extract_text_from_pdf(paper["pdf_path"])
-    
-    # Generate LinkedIn post using ChatGPT
-    linkedin_post = generate_linkedin_post_with_chatgpt(paper, pdf_text)
-    
-    # Extract key points if requested
-    key_points = None
-    if request.include_key_points and pdf_text:
-        key_points = extract_key_points_from_text(pdf_text)
-    
-    # Extract methodology if requested
-    methodology = None
-    if request.include_methodology and pdf_text:
-        methodology = extract_methodology_from_text(pdf_text)
-    
-    # Extract results if requested
-    results = None
-    if request.include_results and pdf_text:
-        results = extract_results_from_text(pdf_text)
-    
-    # Extract visual elements if requested
-    visual_elements = None
-    if request.include_visuals and paper.get("pdf_path") and os.path.exists(paper["pdf_path"]):
-        # Extract figures from PDF
-        figures = extract_figures_from_pdf(paper["pdf_path"])
-        
-        # Create visualization from data if no figures found
-        if not figures and pdf_text:
-            viz_data = create_visualization_from_data(pdf_text)
-            if viz_data:
-                figures.append(("Data Visualization", viz_data))
-        
-        # Convert figures to base64 for easy embedding
-        if figures:
-            visual_elements = []
-            for caption, image_data in figures[:3]:  # Limit to 3 visuals
-                try:
-                    # Convert to base64
-                    base64_data = base64.b64encode(image_data).decode('utf-8')
-                    visual_elements.append({
-                        "caption": caption,
-                        "image_data": base64_data
-                    })
-                except Exception as e:
-                    print(f"Error processing image: {str(e)}")
-    
-    return PaperSummaryResponse(
-        title=paper.get("title", "Untitled"),
-        authors=paper.get("authors", []),
-        year=paper.get("year", 0),
-        summary=linkedin_post,
-        citations=paper.get("citations") if request.include_citations else None,
-        url=paper.get("url"),
-        pdf_path=paper.get("pdf_path"),
-        key_points=key_points,
-        methodology=methodology,
-        results=results,
-        visual_elements=visual_elements
-    )
-
 def save_papers_to_db(papers: List[dict], research_area: str) -> bool:
     """
     Save scraped papers as JSON files under data/scraped_papers directory.
@@ -770,61 +544,6 @@ def sanitize_filename(filename: str) -> str:
     filename = filename.lower().replace(' ', '_')
     
     return filename
-
-def prepare_pdf_for_linkedin(pdf_path: str) -> Optional[bytes]:
-    """
-    Prepare a PDF file for LinkedIn attachment.
-    
-    Args:
-        pdf_path: Path to the PDF file
-        
-    Returns:
-        Optional[bytes]: PDF data if successful, None otherwise
-    """
-    try:
-        if not os.path.exists(pdf_path):
-            return None
-            
-        # Read the PDF file
-        with open(pdf_path, 'rb') as f:
-            pdf_data = f.read()
-            
-        return pdf_data
-    except Exception as e:
-        print(f"Error preparing PDF for LinkedIn: {str(e)}")
-        return None
-
-def create_linkedin_post_from_paper(paper_id: str, max_length: int = 3000) -> Tuple[str, Optional[bytes]]:
-    """
-    Create a complete LinkedIn post from a paper, including summary and PDF attachment.
-    
-    Args:
-        paper_id: ID of the paper to summarize
-        max_length: Maximum length of the post in characters
-        
-    Returns:
-        Tuple[str, Optional[bytes]]: Formatted LinkedIn post and PDF data if available
-    """
-    # Create summary request
-    summary_request = PaperSummaryRequest(
-        paper_id=paper_id,
-        max_length=max_length,
-        include_citations=True,
-        include_visuals=True,
-        include_key_points=True,
-        include_methodology=True,
-        include_results=True
-    )
-    
-    # Get paper summary
-    summary = summarize_paper_for_linkedin(summary_request)
-    
-    # Prepare PDF for attachment if available
-    pdf_data = None
-    if summary.pdf_path:
-        pdf_data = prepare_pdf_for_linkedin(summary.pdf_path)
-    
-    return summary.summary, pdf_data
 
 def read_json_file(file_path: str) -> Dict[str, Any]:
     """

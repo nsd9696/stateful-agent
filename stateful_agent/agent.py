@@ -20,10 +20,9 @@ from tools.paper_crawler import (check_new_papers, crawl_scholar_papers,
 from tools.sqlite import (add_lab_member, create_lab, get_all_labs,
                           get_lab_info, get_user_data, insert_user_data,
                           update_lab_website, update_lab_description, add_research_area)
-from tools.linkedin_publisher import publish_linkedin_post, publish_paper_to_linkedin, search_and_publish_paper
-from tools.rednote_publisher import (publish_rednote_post, publish_paper_to_rednote,
-                                    search_and_publish_paper_rednote, create_rednote_content_with_gpt)
-from tools.paper_scraper import scrape_papers, save_papers_to_db, create_linkedin_post_from_paper
+from tools.linkedin_publisher import publish_linkedin_post, publish_paper_to_linkedin, search_and_publish_paper, create_linkedin_post_from_paper
+from tools.rednote_publisher import PaperData, publish_paper_to_rednote
+from tools.paper_scraper import scrape_papers, save_papers_to_db 
 
 def agent(pocket: PocketLangchain):
     tools = pocket.get_tools()
@@ -145,10 +144,7 @@ if __name__ == "__main__":
             publish_paper_to_linkedin,
             search_and_publish_paper,
             create_linkedin_post_from_paper,
-            publish_rednote_post,
             publish_paper_to_rednote,
-            search_and_publish_paper_rednote,
-            create_rednote_content_with_gpt,
         ]
     
     print("🔍 Checking tools for compatibility...\n")
